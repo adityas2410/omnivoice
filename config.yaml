@@ -1,2 +1,5 @@
 agent:
   model: null
+
+hotkey:
+  push_to_talk: null
