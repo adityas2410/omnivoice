@@ -48,6 +48,26 @@ OmniVoice speaks the result
 
 OmniVoice runs from the terminal while you work normally in Word, browsers, editors, chat applications, and other Windows software.
 
+## Installation
+
+Install OmniVoice as a global command with [uv](https://docs.astral.sh/uv/guides/tools/):
+
+```powershell
+uv tool install omnivoice
+```
+
+Then start it from any terminal:
+
+```powershell
+omnivoice
+```
+
+`uv` installs OmniVoice in its own Python environment and adds the command to your PATH. If you use `pipx` instead, install it with:
+
+```powershell
+pipx install omnivoice
+```
+
 ## Example workflows
 
 One prompt can produce a complete sequence of keyboard actions. OmniVoice plans the sequence, executes it in order, and then reports the result.
