@@ -83,17 +83,37 @@ Speech input and speech output are independently pluggable. This keeps OmniVoice
 
 ## Configuration
 
-Edit the repository-root [config.yaml](config.yaml) to select the agent model and push-to-talk shortcut:
+Edit the repository-root [config.yaml](config.yaml) to select the agent model, speech models, and push-to-talk shortcut.
 
 ```yaml
 agent:
   model: <provider>:<model>
 
+speech:
+  stt: <provider>:<model>
+  tts: <provider>:<model>
+
 hotkey:
-  push_to_talk: <your-hotkey>
+  push_to_talk: <key-combination>
 ```
 
-The agent model uses the `<provider>:<model>` format. Keyboard workflows use models with tool-calling support.
+For example:
+
+```yaml
+agent:
+  model: "openai:gpt-5.2"
+
+speech:
+  stt: "elevenlabs:scribe_v2"
+  tts: "elevenlabs:eleven_flash_v2_5"
+
+hotkey:
+  push_to_talk: "ctrl+alt+space"
+```
+
+The agent model uses the `<provider>:<model>` format. Keyboard workflows use models with tool-calling support. STT and TTS use the same provider-and-model naming pattern, so they can be selected independently.
+
+Hotkey values use lowercase key names joined with `+`. Examples include `ctrl+alt+space`, `ctrl+shift+space`, and `f8`.
 
 Keep provider credentials in environment variables or a local `.env` file. Do not place credentials in `config.yaml`.
 
