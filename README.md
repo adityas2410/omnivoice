@@ -4,8 +4,6 @@
 
 Click into a text field, hold your push-to-talk hotkey, say what you need, and release. OmniVoice understands the request, performs the required keyboard workflow in the focused application, and speaks back with concise status updates.
 
-OmniVoice is not voice dictation. Your speech is an instruction for an AI agent, not text to copy verbatim.
-
 ```text
 Focused editable field
         ↓
@@ -38,15 +36,16 @@ OmniVoice speaks the result
 
 OmniVoice runs from the terminal while you work normally in Word, browsers, editors, chat applications, and other Windows software.
 
-## Keyboard workflows
+## Example workflows
 
-| Spoken prompt | Result |
+One prompt can produce a complete sequence of keyboard actions. OmniVoice plans the sequence, executes it in order, and then reports the result.
+
+| Spoken prompt | Keyboard sequence |
 | --- | --- |
-| “Write a professional response to this email.” | Generates and types a response. |
-| “Make the selected paragraph more concise.” | Rewrites and replaces the selected text. |
-| “Go to the next field.” | Presses `Tab`. |
-| “Save this.” | Presses `Ctrl+S`. |
-| “Undo that.” | Presses `Ctrl+Z`. |
+| “Write a professional response to this email and save it.” | Generates the response → types it → presses `Ctrl+S`. |
+| “Make the selected paragraph more concise and save the document.” | Reads the selection → replaces it with the revision → presses `Ctrl+S`. |
+| “Go to the next field, enter my email address, then continue.” | Presses `Tab` → types the address → continues with the next keyboard action. |
+| “Undo that, rewrite the sentence professionally, and save.” | Presses `Ctrl+Z` → types the revision → presses `Ctrl+S`. |
 
 The Pydantic AI agent works through typed keyboard tools:
 
@@ -143,6 +142,10 @@ CLI runtime
 │   ├── keyboard.py           # Keyboard execution
 │   ├── history.py            # Conversation histories
 │   ├── database.py           # PostgreSQL persistence
-│   └── ...
+│   ├── app.py                # Application lifecycle
+│   ├── cli.py                # Terminal commands
+│   ├── config.py             # Runtime configuration
+│   ├── tools.py              # Typed agent tools
+│   └── observability.py      # Local operational logging
 └── tests/                    # Automated test suite
 ```
