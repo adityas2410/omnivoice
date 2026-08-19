@@ -4,6 +4,17 @@
 
 Click into a text field, hold your push-to-talk hotkey, say what you need, and release. OmniVoice understands the request, performs the required keyboard workflow in the focused application, and speaks back with concise status updates.
 
+## Features
+
+- **Push-to-talk voice control** for any focused application
+- **Multi-step keyboard workflows** from one spoken instruction
+- **Focus-aware field validation** before using model tokens or typing
+- **Selected-text replacement** and full-field rewriting
+- **Focus-change protection** that cancels requests when the target changes
+- **Configurable AI models, STT, TTS, and push-to-talk hotkeys**
+- **Spoken status feedback** for completion, errors, and clarification
+- **Local PostgreSQL conversation histories**
+
 ```text
 Focused editable field
         ↓
@@ -70,6 +81,20 @@ Validate focus
 OmniVoice uses Windows UI Automation to inspect the currently focused control before it works with text. This confirms that the target is an editable, enabled field and keeps keyboard actions directed at the place you selected.
 
 For existing-text edits, OmniVoice reads explicitly selected text as context and replaces that selection with the result. This keeps document, browser, and form workflows precise.
+
+### Focus-change protection
+
+Each voice request is bound to the field that was focused when push-to-talk was released. If you click another field, button, window, or any other element while the AI agent is processing:
+
+```text
+Focus changes
+→ request is cancelled
+→ planned keyboard actions are discarded
+→ no text is inserted anywhere
+→ OmniVoice says: “Focus changed. Request cancelled.”
+```
+
+OmniVoice never moves focus back or sends the result to the newly focused element. To continue, focus the desired field and give the prompt again.
 
 ## Voice feedback
 
