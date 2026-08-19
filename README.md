@@ -1,8 +1,8 @@
 # OmniVoice
 
-**Universal voice AI agent that turns spoken prompts into keyboard operations for web and desktop applications.**
+**Universal voice AI agent that converts speech-to-text (STT) prompts into keyboard actions for web and desktop applications:** Click into any text field, then speak to the AI agent to generate responses into keyboard actions and text-to-speech (TTS) feedback with UI context awareness.
 
-Click into a text field, hold your push-to-talk hotkey, say what you need, and release. OmniVoice understands the request, performs the required keyboard workflow in the focused application, and speaks back with concise status updates.
+Hold your push-to-talk hotkey, say what you need, and release. OmniVoice understands the request, performs the required keyboard workflow in the focused application, and speaks back with concise status updates.
 
 ## Features
 
@@ -185,7 +185,6 @@ CLI runtime
 - **Pydantic AI** — model-agnostic AI-agent framework and typed tool orchestration
 - **PostgreSQL** — local conversation-history storage
 - **Windows UI Automation** — focused editable-field validation
-- **Screenshot context** — visual UI-state awareness for keyboard workflows
 - **Pluggable STT and TTS providers** — speech input and spoken status feedback
 
 ## Repository layout
