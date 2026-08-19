@@ -10,6 +10,7 @@ Click into a text field, hold your push-to-talk hotkey, say what you need, and r
 - **Multi-step keyboard workflows** from one spoken instruction
 - **Focus-aware field validation** before using model tokens or typing
 - **Selected-text replacement** and full-field rewriting
+- **Context-aware screenshots** when visual UI state is needed
 - **Focus-change protection** that cancels requests when the target changes
 - **Configurable AI models, STT, TTS, and push-to-talk hotkeys**
 - **Spoken status feedback** for completion, errors, and clarification
@@ -82,6 +83,12 @@ OmniVoice uses Windows UI Automation to inspect the currently focused control be
 
 For existing-text edits, OmniVoice reads explicitly selected text as context and replaces that selection with the result. This keeps document, browser, and form workflows precise.
 
+### Visual context
+
+The AI agent can take a screenshot of the active application when visual context is needed to complete a keyboard workflow. It uses the screenshot to understand visible UI state, then chooses the next keyboard action.
+
+Screenshots complement Windows UI Automation: accessibility data identifies focused controls and text state, while visual context explains what is currently visible around them. Keyboard input remains OmniVoice's execution mechanism.
+
 ### Focus-change protection
 
 Each voice request is bound to the field that was focused when push-to-talk was released. If you click another field, button, window, or any other element while the AI agent is processing:
@@ -136,7 +143,7 @@ hotkey:
   push_to_talk: "ctrl+alt+space"
 ```
 
-The agent model uses the `<provider>:<model>` format. Keyboard workflows use models with tool-calling support. STT and TTS use the same provider-and-model naming pattern, so they can be selected independently.
+The agent model uses the `<provider>:<model>` format. Keyboard workflows use models with tool-calling support, and screenshot context uses models with image-input support. STT and TTS use the same provider-and-model naming pattern, so they can be selected independently.
 
 Hotkey values use lowercase key names joined with `+`. Examples include `ctrl+alt+space`, `ctrl+shift+space`, and `f8`.
 
@@ -154,6 +161,7 @@ Raw microphone audio is not retained by default.
 - Microphone capture occurs only while push-to-talk is held.
 - Credentials stay outside version control.
 - Local observability records operational metadata such as timing, selected model, and action status.
+- Screenshots are captured only when the AI agent requests visual context for the active application.
 - Logs exclude microphone audio, prompts, selected text, clipboard content, generated text, and typed keystrokes.
 - Pydantic Logfire can be enabled for developer observability when desired.
 
@@ -164,6 +172,7 @@ CLI runtime
 ├── global hotkey listener
 ├── speech boundary (STT and TTS)
 ├── Windows UI Automation focus validation
+├── active-application screenshot context
 ├── AI agent and typed keyboard tools
 ├── keyboard adapter
 ├── local PostgreSQL conversation history
@@ -176,6 +185,7 @@ CLI runtime
 - **Pydantic AI** — model-agnostic AI-agent framework and typed tool orchestration
 - **PostgreSQL** — local conversation-history storage
 - **Windows UI Automation** — focused editable-field validation
+- **Screenshot context** — visual UI-state awareness for keyboard workflows
 - **Pluggable STT and TTS providers** — speech input and spoken status feedback
 
 ## Repository layout
