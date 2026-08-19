@@ -6,10 +6,6 @@ Click into a text field, hold your push-to-talk hotkey, say what you need, and r
 
 OmniVoice is not voice dictation. Your speech is an instruction for an AI agent, not text to copy verbatim.
 
-> “Write a blog about transformers and save the document.”
-
-OmniVoice generates the blog, types it into the focused document, and sends `Ctrl+S`. If a Save As dialog appears, you choose the filename and location.
-
 ```text
 Focused editable field
         ↓
@@ -135,7 +131,7 @@ CLI runtime
 ```text
 .
 ├── README.md                 # Product documentation
-├── LICENSE                   # MIT license
+├── LICENSE                   # Project license
 ├── .gitignore                # Local secrets and Python artifacts
 ├── pyproject.toml            # Python project metadata and dependencies
 ├── config.yaml               # Model and hotkey settings
@@ -150,7 +146,3 @@ CLI runtime
 │   └── ...
 └── tests/                    # Automated test suite
 ```
-
-## License
-
-OmniVoice is released under the [MIT License](LICENSE).
