@@ -13,7 +13,7 @@ Speech prompt
         ↓
 Speech-to-text
         ↓
-Pydantic AI agent
+AI agent
         ↓
 Keyboard workflow + spoken status
 ```
@@ -47,7 +47,7 @@ One prompt can produce a complete sequence of keyboard actions. OmniVoice plans 
 | “Go to the next field, enter my email address, then continue.” | Presses `Tab` → types the address → continues with the next keyboard action. |
 | “Undo that, rewrite the sentence professionally, and save.” | Presses `Ctrl+Z` → types the revision → presses `Ctrl+S`. |
 
-The Pydantic AI agent works through typed keyboard tools:
+The AI agent works through typed keyboard tools:
 
 - Type generated text
 - Press keys and shortcuts
@@ -79,7 +79,7 @@ OmniVoice speaks concise feedback through your selected speakers or headphones:
 - “I need clarification before making a change.”
 - “The draft was inserted and the save command was sent.”
 
-Speech input and speech output are independently pluggable. This keeps OmniVoice compatible with different STT and TTS providers while the Pydantic AI agent remains independent of any single model vendor.
+Speech input and speech output are independently pluggable. This keeps OmniVoice compatible with different STT and TTS providers while the AI agent remains independent of any single model vendor.
 
 ## Configuration
 
@@ -93,7 +93,7 @@ hotkey:
   push_to_talk: <your-hotkey>
 ```
 
-The agent model uses Pydantic AI's `<provider>:<model>` format. Pydantic AI resolves the correct model integration, connection provider, and model profile automatically. Keyboard workflows use models with tool-calling support.
+The agent model uses the `<provider>:<model>` format. Keyboard workflows use models with tool-calling support.
 
 Keep provider credentials in environment variables or a local `.env` file. Do not place credentials in `config.yaml`.
 
@@ -119,11 +119,19 @@ CLI runtime
 ├── global hotkey listener
 ├── speech boundary (STT and TTS)
 ├── Windows UI Automation focus validation
-├── Pydantic AI agent and typed keyboard tools
+├── AI agent and typed keyboard tools
 ├── keyboard adapter
 ├── local PostgreSQL conversation history
 └── local metadata-only observability
 ```
+
+## Technology stack
+
+- **Python** — application runtime
+- **Pydantic AI** — model-agnostic AI-agent framework and typed tool orchestration
+- **PostgreSQL** — local conversation-history storage
+- **Windows UI Automation** — focused editable-field validation
+- **Pluggable STT and TTS providers** — speech input and spoken status feedback
 
 ## Repository layout
 
@@ -135,7 +143,7 @@ CLI runtime
 ├── pyproject.toml            # Python project metadata and dependencies
 ├── config.yaml               # Model and hotkey settings
 ├── src/omnivoice/
-│   ├── agent.py              # Pydantic AI agent loop
+│   ├── agent.py              # AI agent loop
 │   ├── voice.py              # STT and TTS boundary
 │   ├── hotkey.py             # Global push-to-talk
 │   ├── ui_automation.py      # Focus validation
