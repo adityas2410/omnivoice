@@ -175,6 +175,18 @@ OmniVoice keeps selectable conversation histories in local PostgreSQL storage. E
 
 Raw microphone audio is not retained by default.
 
+## Terminal commands
+
+The OmniVoice terminal accepts slash commands while the global push-to-talk listener remains active. The interactive CLI preserves unfinished commands when voice-request status updates arrive.
+
+```text
+/history list
+/history new <name>
+/history use <name>
+/history rename <name>
+/history delete <name>
+```
+
 ## Privacy and observability
 
 - You choose the application and field that receives keyboard input.
@@ -201,6 +213,7 @@ CLI runtime
 
 ## Technology stack
 
+- **prompt_toolkit** — concurrent terminal commands and safe status rendering
 - **Python** — application runtime
 - **Pydantic AI** — model-agnostic AI-agent framework and typed tool orchestration
 - **PostgreSQL** — local conversation-history storage

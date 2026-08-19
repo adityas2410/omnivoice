@@ -9,7 +9,9 @@ description = "Universal voice AI agent for keyboard operations."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = []
+dependencies = [
+    "prompt-toolkit>=3.0",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
