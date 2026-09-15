@@ -1,1 +1,5 @@
-# Reserved for the module entry point.
+from omnivoice.app import main
+
+
+if __name__ == "__main__":
+    main()

@@ -1,9 +1,0 @@
-agent:
-  model: null
-
-hotkey:
-  push_to_talk: null
-
-speech:
-  stt: null
-  tts: null
