@@ -1,246 +1,126 @@
 # OmniVoice
 
-**Universal voice AI agent that converts speech-to-text (STT) prompts into keyboard actions for web and desktop applications:** Click into any text field, then speak to the AI agent to generate responses into keyboard actions and text-to-speech (TTS) feedback with UI context awareness.
+OmniVoice is a Windows-first Python CLI for guarded keyboard automation. It combines a concurrent terminal, a global push-to-talk hotkey, focused editable-control validation, focus-change cancellation, and deliberately armed test typing.
 
-Hold your push-to-talk hotkey, say what you need, and release. OmniVoice understands the request, performs the required keyboard workflow in the focused application, and speaks back with concise status updates.
+## Safety model
 
-## Features
-
-- **Push-to-talk voice control** for any focused application
-- **Multi-step keyboard workflows** from one spoken instruction
-- **Focus-aware field validation** before using model tokens or typing
-- **Selected-text replacement** and full-field rewriting
-- **Context-aware screenshots** when visual UI state is needed
-- **Focus-change protection** that cancels requests when the target changes
-- **Configurable AI models, STT, TTS, and push-to-talk hotkeys**
-- **Spoken status feedback** for completion, errors, and clarification
-- **Local PostgreSQL conversation histories**
+OmniVoice binds every request to the standard editable control focused when the push-to-talk hotkey is released.
 
 ```text
-Focused editable field
-        ↓
-Push-to-talk hotkey
-        ↓
-Speech prompt
-        ↓
-Speech-to-text
-        ↓
-AI agent
-        ↓
-Keyboard workflow + spoken status
+Hotkey released
+→ focused control validated with Windows UI Automation
+→ request bound to an opaque focus identity
+→ simulated processing delay
+→ focus revalidated
+→ armed test marker typed with SendInput
 ```
 
-## How it works
+If the focused control changes, the remaining request is cancelled. OmniVoice never restores focus and never attempts an automatic rollback.
 
-```text
-Click into the target field
-        ↓
-Hold push-to-talk and speak
-        ↓
-Release the hotkey
-        ↓
-OmniVoice validates the focused control
-        ↓
-The agent completes the keyboard workflow
-        ↓
-OmniVoice speaks the result
-```
+Windows synthetic keyboard input is not transactional. There is an unavoidable, very small race between checking focus and Windows dispatching an input event. OmniVoice reduces this risk by monitoring UI Automation focus events and revalidating between logical characters.
 
-OmniVoice runs from the terminal while you work normally in Word, browsers, editors, chat applications, and other Windows software.
+## Supported targets
 
-## Installation
+OmniVoice accepts only controls that Windows UI Automation identifies unambiguously as:
 
-Install OmniVoice as a global command with [uv](https://docs.astral.sh/uv/guides/tools/):
+- Currently focused, enabled, visible, and keyboard-focusable
+- A standard `Edit` control
+- Writable through `ValuePattern` or an unambiguous `TextPattern` read-only attribute
+- Not a password field
+
+Rich document editors such as Word, VS Code editor surfaces, and browser `contenteditable` regions are rejected for now. Ordinary browser inputs and text areas depend on the browser exposing a conforming UI Automation provider.
+
+OmniVoice normally cannot inject input into an application running at a higher Windows integrity level. Run the target and OmniVoice at the same privilege level; do not elevate OmniVoice merely to bypass this protection.
+
+## Development setup
+
+Requirements:
+
+- Windows 11
+- CPython 3.13.5
+
+Create and activate a project environment:
 
 ```powershell
-uv tool install omnivoice
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
 ```
 
-Then start it from any terminal:
+Run the CLI:
 
 ```powershell
 omnivoice
 ```
 
-`uv` installs OmniVoice in its own Python environment and adds the command to your PATH. If you use `pipx` instead, install it with:
+You can also run it as a module:
 
 ```powershell
-pipx install omnivoice
+python -m omnivoice
 ```
 
-## Example workflows
+## Guarded self-test
 
-One prompt can produce a complete sequence of keyboard actions. OmniVoice plans the sequence, executes it in order, and then reports the result.
+Real keyboard input is disabled unless the one-shot self-test is explicitly armed.
 
-| Spoken prompt | Keyboard sequence |
-| --- | --- |
-| “Write a professional response to this email and save it.” | Generates the response → types it → presses `Ctrl+S`. |
-| “Make the selected paragraph more concise and save the document.” | Reads the selection → replaces it with the revision → presses `Ctrl+S`. |
-| “Go to the next field, enter my email address, then continue.” | Presses `Tab` → types the address → continues with the next keyboard action. |
-| “Undo that, rewrite the sentence professionally, and save.” | Presses `Ctrl+Z` → types the revision → presses `Ctrl+S`. |
+1. Start OmniVoice in a terminal.
+2. Enter `/selftest arm`.
+3. Within 30 seconds, focus a supported empty text field.
+4. Hold and release `Ctrl+Alt+Space`.
+5. Keep focus on that field for the two-second simulated processing delay.
 
-The AI agent works through typed keyboard tools:
-
-- Type generated text
-- Press keys and shortcuts
-- Hold and release modifiers
-- Navigate with `Tab` and arrow keys
-- Select, replace, delete, and confirm text
-
-Each workflow follows a controlled sequence:
+If validation succeeds and focus stays unchanged, OmniVoice types:
 
 ```text
-Validate focus
-→ retrieve permitted context when needed
-→ plan keyboard actions
-→ execute the action sequence
-→ speak status
+[OmniVoice safety test]
 ```
 
-## Focus-aware editing
+The arm is consumed by the attempt whether it succeeds or fails. Without arming, the hotkey performs validation only and never types.
 
-OmniVoice uses Windows UI Automation to inspect the currently focused control before it works with text. This confirms that the target is an editable, enabled field and keeps keyboard actions directed at the place you selected.
+To test focus protection, arm the self-test, release the hotkey over a supported field, and switch to another field during the two-second delay. OmniVoice must cancel without typing.
 
-For existing-text edits, OmniVoice reads explicitly selected text as context and replaces that selection with the result. This keeps document, browser, and form workflows precise.
-
-### Visual context
-
-The AI agent can take a screenshot of the active application when visual context is needed to complete a keyboard workflow. It uses the screenshot to understand visible UI state, then chooses the next keyboard action.
-
-Screenshots complement Windows UI Automation: accessibility data identifies focused controls and text state, while visual context explains what is currently visible around them. Keyboard input remains OmniVoice's execution mechanism.
-
-### Focus-change protection
-
-Each voice request is bound to the field that was focused when push-to-talk was released. If you click another field, button, window, or any other element while the AI agent is processing:
+## Terminal commands
 
 ```text
-Focus changes
-→ request is cancelled
-→ planned keyboard actions are discarded
-→ no text is inserted anywhere
-→ OmniVoice says: “Focus changed. Request cancelled.”
+/help          Show command help
+/status        Show the current request, configuration, and arming state
+/selftest arm  Permit one guarded test insertion for 30 seconds
+/cancel        Cancel the active request
+/quit          Shut down and unregister Windows handlers
 ```
 
-OmniVoice never moves focus back or sends the result to the newly focused element. To continue, focus the desired field and give the prompt again.
-
-## Voice feedback
-
-OmniVoice speaks concise feedback through your selected speakers or headphones:
-
-- “Editable text field detected.”
-- “I need clarification before making a change.”
-- “The draft was inserted and the save command was sent.”
-
-Speech input and speech output are independently pluggable. This keeps OmniVoice compatible with different STT and TTS providers while the AI agent remains independent of any single model vendor.
+The terminal uses `prompt_toolkit`, so background hotkey and request statuses are rendered without discarding an unfinished command line.
 
 ## Configuration
 
-Edit the repository-root [config.yaml](config.yaml) to select the agent model, speech models, and push-to-talk shortcut.
+Pass a file explicitly:
 
-```yaml
-agent:
-  model: <provider>:<model>
-
-speech:
-  stt: <provider>:<model>
-  tts: <provider>:<model>
-
-hotkey:
-  push_to_talk: <key-combination>
+```powershell
+omnivoice --config C:\path\to\config.yaml
 ```
 
-For example:
+Without `--config`, OmniVoice reads `%APPDATA%\OmniVoice\config.yaml`. If that file is absent, it uses built-in defaults and does not create a file. See `config.example.yaml`:
 
 ```yaml
-agent:
-  model: "openai:gpt-5.2"
-
-speech:
-  stt: "elevenlabs:scribe_v2"
-  tts: "elevenlabs:eleven_flash_v2_5"
-
 hotkey:
   push_to_talk: "ctrl+alt+space"
 ```
 
-The agent model uses the `<provider>:<model>` format. Keyboard workflows use models with tool-calling support, and screenshot context uses models with image-input support. STT and TTS use the same provider-and-model naming pattern, so they can be selected independently.
+Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plus exactly one letter, digit, function key, or supported named key. F12 is rejected because Windows reserves it for debugging.
 
-Hotkey values use lowercase key names joined with `+`. Examples include `ctrl+alt+space`, `ctrl+shift+space`, and `f8`.
+## Testing
 
-Keep provider credentials in environment variables or a local `.env` file. Do not place credentials in `config.yaml`.
+The default suite uses fake focus and input backends and never sends global keyboard input:
 
-## Conversation histories
-
-OmniVoice keeps selectable conversation histories in local PostgreSQL storage. Each history preserves prompts, agent responses, and action records, giving the agent the right conversational context when you return to a task.
-
-Raw microphone audio is not retained by default.
-
-## Terminal commands
-
-The OmniVoice terminal accepts slash commands while the global push-to-talk listener remains active. The interactive CLI preserves unfinished commands when voice-request status updates arrive.
-
-```text
-/history list
-/history new <name>
-/history use <name>
-/history rename <name>
-/history delete <name>
+```powershell
+pytest
 ```
 
-## Privacy and observability
+Desktop integration tests are opt-in because they register a real global hotkey and initialize desktop UI Automation:
 
-- You choose the application and field that receives keyboard input.
-- Microphone capture occurs only while push-to-talk is held.
-- Credentials stay outside version control.
-- Local observability records operational metadata such as timing, selected model, and action status.
-- Screenshots are captured only when the AI agent requests visual context for the active application.
-- Logs exclude microphone audio, prompts, selected text, clipboard content, generated text, and typed keystrokes.
-- Pydantic Logfire can be enabled for developer observability when desired.
-
-## Architecture
-
-```text
-CLI runtime
-├── global hotkey listener
-├── speech boundary (STT and TTS)
-├── Windows UI Automation focus validation
-├── active-application screenshot context
-├── AI agent and typed keyboard tools
-├── keyboard adapter
-├── local PostgreSQL conversation history
-└── local metadata-only observability
+```powershell
+$env:OMNIVOICE_WINDOWS_INTEGRATION = "1"
+pytest -m windows_integration
 ```
 
-## Technology stack
-
-- **prompt_toolkit** — concurrent terminal commands and safe status rendering
-- **Python** — application runtime
-- **Pydantic AI** — model-agnostic AI-agent framework and typed tool orchestration
-- **PostgreSQL** — local conversation-history storage
-- **Windows UI Automation** — focused editable-field validation
-- **Pluggable STT and TTS providers** — speech input and spoken status feedback
-
-## Repository layout
-
-```text
-.
-├── README.md                 # Product documentation
-├── LICENSE                   # Project license
-├── .gitignore                # Local secrets and Python artifacts
-├── pyproject.toml            # Python project metadata and dependencies
-├── config.yaml               # Model and hotkey settings
-├── src/omnivoice/
-│   ├── agent.py              # AI agent loop
-│   ├── voice.py              # STT and TTS boundary
-│   ├── hotkey.py             # Global push-to-talk
-│   ├── ui_automation.py      # Focus validation
-│   ├── keyboard.py           # Keyboard execution
-│   ├── history.py            # Conversation histories
-│   ├── database.py           # PostgreSQL persistence
-│   ├── app.py                # Application lifecycle
-│   ├── cli.py                # Terminal commands
-│   ├── config.py             # Runtime configuration
-│   ├── tools.py              # Typed agent tools
-│   └── observability.py      # Local operational logging
-└── tests/                    # Automated test suite
-```
+Operational logs contain state changes, timings, process IDs, window handles, control types, and error categories. They do not contain focused text or generated keystroke contents.
