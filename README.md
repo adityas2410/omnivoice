@@ -4,7 +4,7 @@ OmniVoice is a Windows-first Python CLI for guarded keyboard automation. It comb
 
 ## Safety model
 
-OmniVoice binds every request to the standard editable control focused when the push-to-talk hotkey is released.
+OmniVoice binds every request to the supported editable control focused when the push-to-talk hotkey is released.
 
 ```text
 Hotkey released
@@ -24,11 +24,11 @@ Windows synthetic keyboard input is not transactional. There is an unavoidable, 
 OmniVoice accepts only controls that Windows UI Automation identifies unambiguously as:
 
 - Currently focused, enabled, visible, and keyboard-focusable
-- A standard `Edit` control
-- Writable through `ValuePattern` or an unambiguous `TextPattern` read-only attribute
+- A standard `Edit`, editable `ComboBox`, or writable `Document` control
+- Writable through the pattern required for that control type: `ValuePattern` for editable combo boxes and `TextPattern` read-only metadata for document surfaces
 - Not a password field
 
-Rich document editors such as Word, VS Code editor surfaces, and browser `contenteditable` regions are rejected for now. Ordinary browser inputs and text areas depend on the browser exposing a conforming UI Automation provider.
+Selection-only combo boxes and read-only documents are rejected. Rich editors, VS Code editor surfaces, and browser `contenteditable` regions depend on whether their UI Automation provider exposes a supported focused control and unambiguously reports it as writable.
 
 OmniVoice normally cannot inject input into an application running at a higher Windows integrity level. Run the target and OmniVoice at the same privilege level; do not elevate OmniVoice merely to bypass this protection.
 
