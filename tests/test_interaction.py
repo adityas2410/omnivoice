@@ -150,3 +150,21 @@ async def test_partial_input_fails_without_logging_text(
 
     assert controller.last_outcome is RequestState.FAILED
     assert SELF_TEST_TEXT not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_armed_attempt_tells_user_to_rearm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(interaction, "SELF_TEST_PROCESSING_SECONDS", 0.0)
+    statuses: list[str] = []
+    controller = InteractionController(
+        FakeFocus(), KeyboardExecutor(FakeBackend(partial=True)), statuses.append
+    )
+
+    controller.arm_self_test()
+    controller.hotkey_pressed()
+    controller.hotkey_released()
+    await wait_until_idle(controller)
+
+    assert any("/selftest arm again" in status for status in statuses)

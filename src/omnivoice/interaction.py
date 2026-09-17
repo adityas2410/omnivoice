@@ -212,7 +212,10 @@ class InteractionController:
             self._status("Self-test completed.")
             self._finish(RequestState.COMPLETED)
         except InvalidTargetError as exc:
-            self._status(f"Target rejected: {exc}")
+            message = f"Target rejected: {exc}"
+            if armed:
+                message += " Self-test authorization was consumed; run /selftest arm again."
+            self._status(message)
             LOGGER.info("event=target_rejected reason=%s", type(exc).__name__)
             self._finish(RequestState.CANCELLED)
         except asyncio.CancelledError:
@@ -221,8 +224,13 @@ class InteractionController:
                 self._status("Request cancelled before all input was sent.")
                 self._finish(RequestState.CANCELLED)
         except (FocusError, InputError) as exc:
-            self._status(f"Request failed safely: {exc}")
-            LOGGER.error("event=request_failed error_type=%s", type(exc).__name__)
+            message = f"Request failed safely: {exc}"
+            if armed:
+                message += " Self-test authorization was consumed; run /selftest arm again."
+            self._status(message)
+            # This is an expected fail-closed outcome already shown to the user;
+            # keep metadata available at INFO without duplicating it by default.
+            LOGGER.info("event=request_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
         except BaseException:
             self._status("Request failed safely because of an unexpected internal error.")
