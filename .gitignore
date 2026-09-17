@@ -13,3 +13,4 @@ dist/
 .env
 *.log
 CODEBASE_GUIDE.md
+IMPLEMENTATION_MILESTONES.md
