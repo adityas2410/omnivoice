@@ -29,7 +29,9 @@ class FocusLease:
 
     runtime_id: tuple[int, ...]
     process_id: int
-    native_window_handle: int
+    # UIA providers are allowed to omit a native HWND for virtualized controls.
+    # The runtime ID and process ID remain the primary request-local identity.
+    native_window_handle: int | None
     control_type: int
 
 
@@ -241,14 +243,21 @@ class FocusService:
 
     @staticmethod
     def _capture(automation: Any, module: Any) -> FocusLease:
-        """Build a lease only for an unambiguously writable standard Edit."""
+        """Build a lease only for a supported control proven to be writable."""
 
         try:
-            element = automation.GetFocusedElement()
-            if element is None:
+            focused = automation.GetFocusedElement()
+            # comtypes represents a NULL interface as a false pointer object,
+            # not necessarily as Python's None.
+            if not focused:
                 raise InvalidTargetError("No control currently has keyboard focus")
-            if not bool(element.CurrentHasKeyboardFocus):
+            if not bool(focused.CurrentHasKeyboardFocus):
                 raise InvalidTargetError("The focused control did not confirm keyboard focus")
+
+            # Browser and framework providers sometimes put keyboard focus on a
+            # text child inside the actual Edit control. Resolve that narrow case
+            # while requiring ComboBox and Document targets to hold focus directly.
+            element = FocusService._resolve_target(automation, module, focused)
             if not bool(element.CurrentIsEnabled):
                 raise InvalidTargetError("The focused control is disabled")
             if not bool(element.CurrentIsKeyboardFocusable):
@@ -258,19 +267,32 @@ class FocusService:
             if bool(element.CurrentIsOffscreen):
                 raise InvalidTargetError("The focused control is off-screen")
 
-            control_type = int(element.CurrentControlType)
-            if control_type != int(module.UIA_EditControlTypeId):
-                raise InvalidTargetError("Only standard Edit controls are supported")
-            if not FocusService._is_writable(element, module):
-                raise InvalidTargetError("The focused Edit control is read-only or ambiguous")
+            control_type = FocusService._required_int(
+                element.CurrentControlType, "control type"
+            )
+            if not FocusService._is_writable(element, module, control_type):
+                name = FocusService._control_type_name(module, control_type)
+                raise InvalidTargetError(
+                    f"The focused {name} control is read-only or ambiguous"
+                )
 
-            runtime_id = tuple(int(part) for part in element.GetRuntimeId())
+            raw_runtime_id = element.GetRuntimeId()
+            if raw_runtime_id is None:
+                raise InvalidTargetError("The focused control has no runtime identifier")
+            runtime_id = tuple(
+                FocusService._required_int(part, "runtime identifier")
+                for part in raw_runtime_id
+            )
             if not runtime_id:
                 raise InvalidTargetError("The focused control has no stable runtime identifier")
             return FocusLease(
                 runtime_id=runtime_id,
-                process_id=int(element.CurrentProcessId),
-                native_window_handle=int(element.CurrentNativeWindowHandle),
+                process_id=FocusService._required_int(
+                    element.CurrentProcessId, "process identifier"
+                ),
+                native_window_handle=FocusService._optional_int(
+                    element.CurrentNativeWindowHandle
+                ),
                 control_type=control_type,
             )
         except InvalidTargetError:
@@ -279,22 +301,122 @@ class FocusService:
             raise FocusError(f"Windows UI Automation could not inspect focus: {exc}") from exc
 
     @staticmethod
-    def _is_writable(element: Any, module: Any) -> bool:
-        """Accept only UIA patterns that explicitly report writable content."""
+    def _resolve_target(automation: Any, module: Any, focused: Any) -> Any:
+        """Resolve a directly focused supported control or an Edit wrapper."""
+
+        edit_type = FocusService._required_int(
+            module.UIA_EditControlTypeId, "Edit control type"
+        )
+        combo_box_type = FocusService._required_int(
+            module.UIA_ComboBoxControlTypeId, "ComboBox control type"
+        )
+        document_type = FocusService._required_int(
+            module.UIA_DocumentControlTypeId, "Document control type"
+        )
+        focused_type = FocusService._required_int(
+            focused.CurrentControlType, "focused control type"
+        )
+        if focused_type in {edit_type, combo_box_type, document_type}:
+            return focused
 
         try:
-            unknown = element.GetCurrentPattern(module.UIA_ValuePatternId)
-            value_pattern = unknown.QueryInterface(module.IUIAutomationValuePattern)
-            return not bool(value_pattern.CurrentIsReadOnly)
-        except BaseException:
-            pass
+            walker = automation.RawViewWalker
+        except BaseException as exc:
+            name = FocusService._control_type_name(module, focused_type)
+            raise InvalidTargetError(
+                f"The focused control type is not supported ({name})"
+            ) from exc
 
-        try:
-            unknown = element.GetCurrentPattern(module.UIA_TextPatternId)
-            text_pattern = unknown.QueryInterface(module.IUIAutomationTextPattern)
-            value = text_pattern.DocumentRange.GetAttributeValue(
-                module.UIA_IsReadOnlyAttributeId
+        element = focused
+        # A shallow limit prevents malformed providers from causing unbounded
+        # traversal while covering the wrapper nodes used by browsers and WPF.
+        for _ in range(6):
+            try:
+                element = walker.GetParentElement(element)
+            except BaseException:
+                break
+            # A typed NULL COM pointer compares unequal to None but is false.
+            # Stop before reading a property from it.
+            if not element:
+                break
+            control_type = FocusService._required_int(
+                element.CurrentControlType, "ancestor control type"
             )
-            return value is False or value == 0
-        except BaseException:
-            return False
+            if control_type == edit_type:
+                return element
+
+        name = FocusService._control_type_name(module, focused_type)
+        raise InvalidTargetError(
+            f"The focused control type is not supported ({name})"
+        )
+
+    @staticmethod
+    def _required_int(value: Any, property_name: str) -> int:
+        """Convert a required UIA integer with a useful provider error."""
+
+        if value is None:
+            raise FocusError(f"UI Automation did not provide the {property_name}")
+        return int(value)
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        """Normalize optional UIA integer properties without failing a lease."""
+
+        if value is None:
+            return None
+        converted = int(value)
+        return converted or None
+
+    @staticmethod
+    def _control_type_name(module: Any, control_type: int) -> str:
+        """Turn common UIA control IDs into safe, useful diagnostics."""
+
+        names = {
+            getattr(module, "UIA_ComboBoxControlTypeId", -1): "ComboBox",
+            getattr(module, "UIA_EditControlTypeId", -1): "Edit",
+            getattr(module, "UIA_DocumentControlTypeId", -1): "Document",
+            getattr(module, "UIA_TextControlTypeId", -1): "Text",
+            getattr(module, "UIA_PaneControlTypeId", -1): "Pane",
+            getattr(module, "UIA_CustomControlTypeId", -1): "Custom",
+        }
+        return names.get(control_type, f"Unknown ({control_type})")
+
+    @staticmethod
+    def _is_writable(element: Any, module: Any, control_type: int) -> bool:
+        """Require the writable pattern appropriate for the target's type."""
+
+        edit_type = FocusService._required_int(
+            module.UIA_EditControlTypeId, "Edit control type"
+        )
+        combo_box_type = FocusService._required_int(
+            module.UIA_ComboBoxControlTypeId, "ComboBox control type"
+        )
+        document_type = FocusService._required_int(
+            module.UIA_DocumentControlTypeId, "Document control type"
+        )
+
+        # UIA requires an editable ComboBox to expose ValuePattern. Requiring it
+        # prevents selection-only drop-downs from being treated as text fields.
+        if control_type in {edit_type, combo_box_type}:
+            try:
+                unknown = element.GetCurrentPattern(module.UIA_ValuePatternId)
+                value_pattern = unknown.QueryInterface(module.IUIAutomationValuePattern)
+                return not bool(value_pattern.CurrentIsReadOnly)
+            except BaseException:
+                if control_type == combo_box_type:
+                    return False
+
+        # TextPattern cannot set content itself, but its read-only attribute is
+        # the UIA signal needed before guarded SendInput targets a text surface.
+        if control_type in {edit_type, document_type}:
+            try:
+                unknown = element.GetCurrentPattern(module.UIA_TextPatternId)
+                text_pattern = unknown.QueryInterface(module.IUIAutomationTextPattern)
+                value = text_pattern.DocumentRange.GetAttributeValue(
+                    module.UIA_IsReadOnlyAttributeId
+                )
+                return value is False or value == 0
+            except BaseException:
+                return False
+
+        return False
