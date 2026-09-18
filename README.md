@@ -163,8 +163,6 @@ Agent models use named profiles so `/model NAME` can change the active model for
 the current process. `default_model` is restored whenever OmniVoice starts and
 must name an entry in `models`; runtime switching never rewrites the YAML file.
 `/models` only displays configured profiles and does not contact Groq or Ollama.
-When no user configuration exists, the three profiles shown above are available
-as built-in defaults with `groq-fast` selected.
 Groq reads `GROQ_API_KEY` from the process environment. Local Ollama uses its
 OpenAI-compatible endpoint at `http://localhost:11434/v1` and needs no API key.
 An empty `agent` configuration remains valid while AI actions are unavailable.
