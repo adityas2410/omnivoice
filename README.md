@@ -1,6 +1,6 @@
 # OmniVoice
 
-OmniVoice is a Windows-first, local voice-dictation CLI. It records English speech while a global push-to-talk hotkey is held, transcribes it with `whisper.cpp`, and types the literal transcript only if the original editable field still owns focus. Windows SAPI provides short status confirmations such as “Done.”
+OmniVoice is a Windows-first voice-dictation and constrained AI-action CLI. It records English speech while a global push-to-talk hotkey is held and transcribes it locally with `whisper.cpp`. The dictation hotkey types the literal transcript, while the separate agent hotkey asks a configured Groq or local Ollama model for one validated keyboard-action plan. Both paths operate only while the original editable field still owns focus. Windows SAPI provides short fixed confirmations such as “Done.”
 
 ## Safety model
 
@@ -12,8 +12,9 @@ Press hotkey
 → hear a short ready beep
 → record while the hotkey remains held
 → transcribe locally after release
-→ revalidate focus and released modifiers
-→ type through guarded SendInput
+→ literal hotkey: type the transcript
+→ agent hotkey: generate and validate one complete action plan
+→ revalidate focus and released modifiers before guarded SendInput
 ```
 
 Changing fields or windows cancels the remaining request. OmniVoice never restores focus and never attempts an automatic rollback. During insertion it checks the focus lease between logical characters and emits UTF-16 surrogate pairs atomically.
@@ -82,6 +83,33 @@ Recording stops accepting audio after 30 seconds and waits for hotkey release be
 
 On the documented CPU-only baseline, local transcription can take time after the hotkey is released. `/cancel` remains available throughout recording, transcription, and typing.
 
+## Constrained AI actions
+
+Focus a supported field, hold `Ctrl+Alt+Shift+Space`, speak a request, and release
+`Space`. OmniVoice transcribes locally, snapshots the session's selected model,
+and starts one structured model run, with at most one schema-correction retry.
+This path has no conversation history, model tools, screen access, or autonomous
+execution loop.
+
+The initial action vocabulary is deliberately small:
+
+- Insert at most 2,000 printable Unicode characters at the caret.
+- Send exactly `Ctrl+S` or `Ctrl+Z`.
+- Execute at most five actions in one plan.
+
+The model receives the permitted chord list and uses its own Windows knowledge to
+interpret requests such as “save this”; the prompt does not contain a mapping for
+every phrase. OmniVoice validates the complete returned plan before its first
+action. Unknown actions, extra fields, control characters, and any shortcut not in
+the code-owned allowlist reject the entire plan. Focus is checked before every
+action and between inserted characters. Execution stops without guessed rollback
+if focus changes, cancellation occurs, or Windows accepts only part of an input.
+
+Groq requires `GROQ_API_KEY`. Local Ollama uses
+`http://localhost:11434/v1` without a key, but Ollama must be running and the
+selected model must already be installed. Models are never downloaded or probed
+by startup, `/models`, or `/model`.
+
 ## Guarded self-test
 
 The fixed marker test bypasses the microphone and STT provider while exercising the same focus lease and guarded keyboard path:
@@ -103,10 +131,10 @@ Authorization is one-shot and is consumed by the attempt, including a rejected o
 
 ```text
 /help          Show command help
-/status        Show request, provider, voice, microphone, and self-test state
+/status        Show both hotkeys, model, request, speech, microphone, and self-test state
 /models        Show agent models configured in YAML
 /model NAME    Select an agent model for this session
-/selftest arm  Permit one guarded fixed-marker insertion for 30 seconds
+/selftest arm  Permit one guarded dictation-hotkey insertion for 30 seconds
 /cancel        Cancel recording, transcription, processing, or typing
 /quit          Shut down and unregister all workers and Windows handlers
 ```
@@ -134,6 +162,7 @@ agent:
 
 hotkey:
   push_to_talk: "ctrl+alt+space"
+  agent_push_to_talk: "ctrl+alt+shift+space"
 
 speech:
   stt:
@@ -184,6 +213,11 @@ only the provider keys you use. A `.env` in the current working directory is
 also loaded for source-development workflows, and existing process environment
 variables take precedence.
 An empty `agent` configuration remains valid while AI actions are unavailable.
+Selecting a configured profile changes only the current process. Provider
+credentials and model availability are checked only when the agent hotkey uses
+that profile. A configured local Ollama profile may therefore be listed and
+selected even when its model is not installed; the request then fails without
+sending keyboard input.
 
 Pass `--config C:\path\to\config.yaml` only when intentionally using a
 different file.
@@ -192,17 +226,17 @@ different file.
 
 STT and TTS can be disabled independently. With STT disabled or unavailable, the CLI and guarded self-test still run. If the configured SAPI voice is missing, OmniVoice warns and uses the Windows default voice. TTS failures never change a successful keyboard outcome.
 
-Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plus exactly one letter, digit, function key, or supported named key. F12 is rejected because Windows reserves it for debugging.
+Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plus exactly one letter, digit, function key, or supported named key. F12 is rejected because Windows reserves it for debugging. Dictation and agent chords must be different, including when their modifiers are written in a different order.
 
 ## Privacy and logs
 
-Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. No speech API is contacted.
+Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. Literal dictation contacts no LLM. Only the transcript produced by the agent hotkey is sent to its snapshotted Groq or local Ollama model.
 
-Operational logs contain provider and model names, timings, state changes, byte and character counts, control metadata, and error categories. They do not contain audio, transcript text, spoken status content, focused-control contents, generated files, subprocess output, or temporary filenames.
+Operational logs contain provider and model names, timings, state changes, byte and character counts, control metadata, and error categories. They do not contain credentials, audio, transcript text, prompts, model responses, generated text, spoken status content, focused-control contents, subprocess output, or temporary filenames.
 
 ## Testing
 
-The default suite uses fake microphone, STT, TTS, focus, and keyboard backends. It does not record audio, play speech, contact the network, or type globally:
+The default suite uses fake microphone, STT, TTS, model, focus, and keyboard backends. It explicitly disables real Pydantic AI model requests and does not record audio, play speech, contact the network, consume provider quota, or type globally:
 
 ```powershell
 python -m pytest
