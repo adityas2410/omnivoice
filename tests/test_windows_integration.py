@@ -1,12 +1,15 @@
 import asyncio
+import ctypes
 import os
 import tkinter as tk
 
 import pytest
 
+from omnivoice.speech.audio import list_input_devices
 from omnivoice.windows.focus import FocusLease, FocusService, InvalidTargetError
 from omnivoice.windows.hotkey import GlobalHotkey, parse_hotkey
 from omnivoice.windows.keyboard import KeyboardExecutor, WindowsInputBackend
+from omnivoice.windows.speech import WindowsSapiTTS
 
 
 pytestmark = [
@@ -38,6 +41,30 @@ def test_f24_hotkey_registers_and_unregisters() -> None:
     listener.stop()
 
 
+def test_portaudio_enumerates_input_devices() -> None:
+    devices = list_input_devices()
+
+    assert all(isinstance(identifier, int) and name for identifier, name in devices)
+
+
+@pytest.mark.asyncio
+async def test_sapi_initializes_and_closes_without_speaking() -> None:
+    warnings: list[str] = []
+    tts = WindowsSapiTTS(
+        voice_name="Microsoft Zira Desktop",
+        rate=0,
+        volume=100,
+        warning=warnings.append,
+    )
+
+    await tts.start()
+    try:
+        assert tts.readiness.ready
+        assert tts.voice_name
+    finally:
+        await tts.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_guarded_typing_into_owned_edit_control() -> None:
     service = FocusService(lambda _: None)
@@ -51,6 +78,9 @@ async def test_guarded_typing_into_owned_edit_control() -> None:
     root.update()
     entry.focus_force()
     root.update()
+    if int(ctypes.windll.user32.GetForegroundWindow()) != int(root.winfo_id()):
+        root.destroy()
+        pytest.skip("Windows did not grant foreground focus to the temporary test window")
 
     pumping = True
 

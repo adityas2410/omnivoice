@@ -12,7 +12,7 @@ from omnivoice.interaction import InteractionController
 
 HELP = """Commands:
   /help          Show this help
-  /status        Show runtime and self-test state
+  /status        Show request, speech-provider, microphone, and self-test state
   /selftest arm  Permit one guarded test insertion for 30 seconds
   /cancel        Cancel the active request
   /quit          Shut down OmniVoice

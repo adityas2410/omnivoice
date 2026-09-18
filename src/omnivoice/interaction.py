@@ -1,4 +1,4 @@
-"""Request lifecycle and guarded self-test orchestration."""
+"""Focus-bound dictation and guarded self-test request orchestration."""
 
 from __future__ import annotations
 
@@ -8,6 +8,15 @@ import time
 from enum import StrEnum
 from typing import Callable, Protocol
 
+from omnivoice.speech.ports import (
+    AudioRecorder,
+    ReadyCue,
+    RecorderError,
+    Recording,
+    SpeechToText,
+    SpeechToTextError,
+    TextToSpeech,
+)
 from omnivoice.windows.focus import FocusError, FocusLease, InvalidTargetError
 from omnivoice.windows.keyboard import InputError, KeyboardExecutor
 
@@ -22,8 +31,9 @@ class RequestState(StrEnum):
     """Expose each externally meaningful stage of a hotkey request."""
 
     IDLE = "idle"
-    LISTENING = "listening"
     VALIDATING = "validating"
+    LISTENING = "listening"
+    TRANSCRIBING = "transcribing"
     PROCESSING = "processing"
     EXECUTING = "executing"
     COMPLETED = "completed"
@@ -43,23 +53,43 @@ class FocusPort(Protocol):
     async def clear_watch(self) -> None: ...
 
 
+class _RequestCancelled(Exception):
+    """Carry a user-facing cancellation reason through the async pipeline."""
+
+
 class InteractionController:
-    """Serialize hotkey requests and enforce the focus lease."""
+    """Serialize requests and keep speech-generated input bound to one focus lease."""
 
     def __init__(
         self,
         focus: FocusPort,
         keyboard: KeyboardExecutor,
         status: Callable[[str], None],
+        *,
+        recorder: AudioRecorder | None = None,
+        stt: SpeechToText | None = None,
+        tts: TextToSpeech | None = None,
+        ready_cue: ReadyCue | None = None,
+        minimum_recording_seconds: float = 0.15,
+        silence_rms_threshold: int = 80,
+        recording_limit_seconds: float = 30.0,
     ) -> None:
         self._focus = focus
         self._keyboard = keyboard
         self._status = status
+        self._recorder = recorder
+        self._stt = stt
+        self._tts = tts
+        self._ready_cue = ready_cue
+        self._minimum_recording_seconds = minimum_recording_seconds
+        self._silence_rms_threshold = silence_rms_threshold
+        self._recording_limit_seconds = recording_limit_seconds
         self.state = RequestState.IDLE
         self.last_outcome: RequestState | None = None
         self._armed_until = 0.0
         self._active_lease: FocusLease | None = None
         self._cancelled = asyncio.Event()
+        self._released = asyncio.Event()
         self._request_task: asyncio.Task[None] | None = None
         self._shutting_down = False
 
@@ -80,14 +110,14 @@ class InteractionController:
         LOGGER.info("event=self_test_armed expires_in_seconds=30")
 
     def describe_status(self) -> str:
-        """Return operational state without exposing focused or typed text."""
+        """Return request state without exposing focused, spoken, or typed text."""
 
         last = self.last_outcome.value if self.last_outcome is not None else "none"
         armed = "yes" if self.is_armed else "no"
         return f"state={self.state.value}, self_test_armed={armed}, last_outcome={last}"
 
     def hotkey_pressed(self) -> None:
-        """Begin one request or reject overlapping push-to-talk input."""
+        """Start press-time target binding or reject an overlapping request."""
 
         if self._shutting_down:
             return
@@ -96,46 +126,49 @@ class InteractionController:
             LOGGER.info("event=hotkey_ignored state=%s", self.state.value)
             return
         self._cancelled = asyncio.Event()
-        self._set_state(RequestState.LISTENING)
-        self._status("Push-to-talk active. Release the hotkey to validate the target.")
-
-    def hotkey_released(self) -> None:
-        """Consume any self-test grant and start asynchronous validation."""
-
-        if self._shutting_down or self.state is not RequestState.LISTENING:
-            return
+        self._released = asyncio.Event()
         armed = self._consume_arm()
+        self._set_state(RequestState.VALIDATING)
         self._request_task = asyncio.create_task(
-            self._process_release(armed), name="omnivoice-request"
+            self._run_request(armed), name="omnivoice-request"
         )
 
+    def hotkey_released(self) -> None:
+        """Tell the active request to stop capture or continue the self-test."""
+
+        if not self._shutting_down and self.state is not RequestState.IDLE:
+            self._released.set()
+
     def focus_lost(self, lease: FocusLease) -> None:
-        """Cancel only when UIA reports loss of the active request's target."""
+        """Cancel whenever UIA reports loss of the request's bound target."""
 
         if self._active_lease == lease and self.state in {
+            RequestState.VALIDATING,
+            RequestState.LISTENING,
+            RequestState.TRANSCRIBING,
             RequestState.PROCESSING,
             RequestState.EXECUTING,
         }:
             self.cancel("Focus changed. Request cancelled.")
 
     def cancel(self, reason: str = "Request cancelled.") -> None:
-        """Signal cooperative cancellation without sending compensating input."""
+        """Signal every stage without refocusing or attempting keyboard rollback."""
 
         if self.state is RequestState.IDLE:
             self._status("No active request to cancel.")
             return
         self._cancelled.set()
+        self._released.set()
         self._status(reason)
         LOGGER.info("event=request_cancel_requested state=%s", self.state.value)
-        if self.state is RequestState.LISTENING:
-            self._finish(RequestState.CANCELLED)
 
     async def shutdown(self) -> None:
-        """Stop active work and remove focus monitoring before loop shutdown."""
+        """Cancel active work and release request-scoped resources."""
 
         self._shutting_down = True
         if self.state is not RequestState.IDLE:
             self._cancelled.set()
+            self._released.set()
         task = self._request_task
         if task is not None and not task.done():
             try:
@@ -151,12 +184,14 @@ class InteractionController:
         self._armed_until = 0.0
         return armed
 
-    async def _process_release(self, armed: bool) -> None:
-        """Validate, bind, delay, revalidate, and optionally type one marker."""
+    async def _run_request(self, armed: bool) -> None:
+        """Run self-test or literal dictation against one immutable focus lease."""
 
+        recording: Recording | None = None
+        recorder_active = False
         try:
-            self._set_state(RequestState.VALIDATING)
-            self._status("Validating the focused control...")
+            await self._stop_pending_speech()
+            self._status("Validating and binding the focused control...")
             lease = await self._focus.capture()
             self._active_lease = lease
             LOGGER.info(
@@ -165,52 +200,53 @@ class InteractionController:
                 lease.native_window_handle,
                 lease.control_type,
             )
-
             if self._cancelled.is_set():
-                self._finish(RequestState.CANCELLED)
-                return
-
-            if not armed:
-                self._status("Editable target detected. Use /selftest arm to permit test typing.")
-                self._finish(RequestState.COMPLETED)
-                return
-
+                raise _RequestCancelled("Request cancelled.")
+            if self._released.is_set():
+                raise _RequestCancelled("Hotkey released before the target was ready.")
             if not await self._focus.watch(lease):
-                # Watching also performs an immediate second comparison, closing
-                # the gap between the initial snapshot and event subscription.
-                self._cancelled.set()
-                self._status("Focus changed. Request cancelled.")
+                raise _RequestCancelled("Focus changed. Request cancelled.")
+
+            if armed:
+                await self._run_self_test(lease)
+                return
+
+            self._require_dictation_ready()
+            await self._play_ready_cue()
+            if self._cancelled.is_set() or self._released.is_set():
+                raise _RequestCancelled("Hotkey released before recording was ready.")
+            assert self._recorder is not None
+            await self._recorder.start()
+            recorder_active = True
+            self._set_state(RequestState.LISTENING)
+            self._status("Listening. Speak now, then release the hotkey.")
+            await self._wait_for_recording_end()
+            if self._cancelled.is_set():
+                raise _RequestCancelled("Request cancelled.")
+
+            recording = await self._recorder.stop()
+            recorder_active = False
+            if self._cancelled.is_set():
+                raise _RequestCancelled("Request cancelled.")
+            if recording.is_silent(
+                self._minimum_recording_seconds,
+                self._silence_rms_threshold,
+            ):
+                self._status("No speech detected.")
+                await self._speak("No speech detected.")
                 self._finish(RequestState.CANCELLED)
                 return
 
-            self._set_state(RequestState.PROCESSING)
-            self._status("Target bound. Simulating two seconds of processing...")
-            if await self._wait_or_cancel(SELF_TEST_PROCESSING_SECONDS):
-                self._finish(RequestState.CANCELLED)
-                return
-
-            if not await self._keyboard.wait_for_modifiers_released(timeout=1.0):
-                # Residual push-to-talk modifiers could transform typed text into
-                # destructive application shortcuts, so failure is fail-closed.
-                self._cancelled.set()
-                self._status("A modifier key remained held. Request cancelled.")
-                self._finish(RequestState.CANCELLED)
-                return
-            if not await self._focus.matches(lease):
-                self._cancelled.set()
-                self._status("Focus changed. Request cancelled.")
-                self._finish(RequestState.CANCELLED)
-                return
-
-            self._set_state(RequestState.EXECUTING)
-            self._status("Typing the armed safety marker...")
-            await self._keyboard.type_text(
-                SELF_TEST_TEXT,
-                lambda: self._focus.matches(lease),
-                self._cancelled,
-            )
-            self._status("Self-test completed.")
+            self._set_state(RequestState.TRANSCRIBING)
+            self._status("Transcribing locally...")
+            assert self._stt is not None
+            transcript = await self._stt.transcribe(recording, self._cancelled)
+            if self._cancelled.is_set():
+                raise _RequestCancelled("Request cancelled.")
+            await self._execute_text(lease, transcript)
+            self._status("Dictation completed.")
             self._finish(RequestState.COMPLETED)
+            await self._speak("Done.")
         except InvalidTargetError as exc:
             message = f"Target rejected: {exc}"
             if armed:
@@ -218,55 +254,196 @@ class InteractionController:
             self._status(message)
             LOGGER.info("event=target_rejected reason=%s", type(exc).__name__)
             self._finish(RequestState.CANCELLED)
+            await self._speak("That field isn't supported.")
+        except _RequestCancelled as exc:
+            if str(exc) and not self._cancelled.is_set():
+                self._status(str(exc))
+            self._cancelled.set()
+            self._finish(RequestState.CANCELLED)
+            await self._speak("Cancelled.")
         except asyncio.CancelledError:
             self._cancelled.set()
             if self.state is not RequestState.IDLE:
                 self._status("Request cancelled before all input was sent.")
                 self._finish(RequestState.CANCELLED)
+            await self._speak("Cancelled.")
+        except SpeechToTextError as exc:
+            self._status(f"Transcription failed: {exc}")
+            LOGGER.info("event=transcription_failed error_type=%s", type(exc).__name__)
+            self._finish(RequestState.FAILED)
+            await self._speak("Transcription failed.")
+        except RecorderError as exc:
+            self._status(f"Recording failed safely: {exc}")
+            LOGGER.info("event=recording_failed error_type=%s", type(exc).__name__)
+            self._finish(RequestState.FAILED)
+            await self._speak("Cancelled.")
         except (FocusError, InputError) as exc:
             message = f"Request failed safely: {exc}"
             if armed:
                 message += " Self-test authorization was consumed; run /selftest arm again."
             self._status(message)
-            # This is an expected fail-closed outcome already shown to the user;
-            # keep metadata available at INFO without duplicating it by default.
             LOGGER.info("event=request_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
-        except BaseException:
+            await self._speak("Cancelled.")
+        except BaseException as exc:
             self._status("Request failed safely because of an unexpected internal error.")
-            LOGGER.exception("event=request_failed error_type=unexpected")
+            # Arbitrary provider exception messages can contain content, so the
+            # request log records only their class rather than a traceback.
+            LOGGER.error("event=request_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
+            await self._speak("Cancelled.")
         finally:
+            if recorder_active and self._recorder is not None:
+                await self._safe_cancel_recorder()
+            if recording is not None:
+                self._safe_cleanup_recording(recording)
             self._active_lease = None
             await self._safe_clear_watch()
             self._request_task = None
+            self._set_state(RequestState.IDLE)
+
+    async def _run_self_test(self, lease: FocusLease) -> None:
+        """Run the diagnostic marker without microphone or transcription use."""
+
+        self._set_state(RequestState.LISTENING)
+        self._status("Self-test target bound. Release the hotkey to continue.")
+        await self._wait_for_release_or_cancel()
+        self._set_state(RequestState.PROCESSING)
+        self._status("Target bound. Simulating two seconds of processing...")
+        if await self._wait_or_cancel(SELF_TEST_PROCESSING_SECONDS):
+            raise _RequestCancelled("Request cancelled.")
+        await self._execute_text(lease, SELF_TEST_TEXT)
+        self._status("Self-test completed.")
+        self._finish(RequestState.COMPLETED)
+        await self._speak("Done.")
+
+    def _require_dictation_ready(self) -> None:
+        if self._recorder is None or self._stt is None:
+            raise SpeechToTextError("Speech-to-text is disabled")
+        readiness = self._stt.readiness
+        if not readiness.ready:
+            raise SpeechToTextError(readiness.detail)
+
+    async def _play_ready_cue(self) -> None:
+        if self._ready_cue is None:
+            return
+        try:
+            await self._ready_cue.play()
+        except BaseException as exc:
+            # A cue is useful feedback but is not part of the focus or input
+            # safety boundary, so a device-specific beep failure is non-fatal.
+            LOGGER.info("event=ready_cue_failed error_type=%s", type(exc).__name__)
+            self._status("Ready cue unavailable; recording will continue.")
+
+    async def _wait_for_recording_end(self) -> None:
+        """Stop accepting audio at the limit but wait for physical key release."""
+
+        assert self._recorder is not None
+        release_task = asyncio.create_task(self._released.wait())
+        cancel_task = asyncio.create_task(self._cancelled.wait())
+        limit_task = asyncio.create_task(self._recorder.wait_until_limit())
+        tasks = {release_task, cancel_task, limit_task}
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_task in done and cancel_task.result():
+                raise _RequestCancelled("Request cancelled.")
+            if limit_task in done:
+                limit = f"{self._recording_limit_seconds:g}"
+                self._status(f"{limit}-second recording limit reached. Release the hotkey.")
+                done, _ = await asyncio.wait(
+                    {release_task, cancel_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancel_task in done and cancel_task.result():
+                    raise _RequestCancelled("Request cancelled.")
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _wait_for_release_or_cancel(self) -> None:
+        release_task = asyncio.create_task(self._released.wait())
+        cancel_task = asyncio.create_task(self._cancelled.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {release_task, cancel_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_task in done and cancel_task.result():
+                raise _RequestCancelled("Request cancelled.")
+        finally:
+            for task in (release_task, cancel_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(release_task, cancel_task, return_exceptions=True)
+
+    async def _execute_text(self, lease: FocusLease, text: str) -> None:
+        """Perform final modifier and focus checks before guarded SendInput."""
+
+        if not await self._keyboard.wait_for_modifiers_released(timeout=1.0):
+            raise _RequestCancelled("A modifier key remained held. Request cancelled.")
+        if not await self._focus.matches(lease):
+            raise _RequestCancelled("Focus changed. Request cancelled.")
+        self._set_state(RequestState.EXECUTING)
+        self._status("Typing into the bound field...")
+        await self._keyboard.type_text(
+            text,
+            lambda: self._focus.matches(lease),
+            self._cancelled,
+        )
 
     async def _wait_or_cancel(self, seconds: float) -> bool:
-        """Make simulated processing immediately responsive to cancellation."""
-
         try:
             await asyncio.wait_for(self._cancelled.wait(), timeout=seconds)
             return True
         except TimeoutError:
             return False
 
-    async def _safe_clear_watch(self) -> None:
-        """Remove a lease watch without masking the request's main outcome."""
+    async def _stop_pending_speech(self) -> None:
+        if self._tts is None:
+            return
+        try:
+            await self._tts.stop()
+        except BaseException as exc:
+            LOGGER.info("event=tts_stop_failed error_type=%s", type(exc).__name__)
 
+    async def _speak(self, text: str) -> None:
+        """Keep fixed status speech best-effort and out of request outcomes."""
+
+        if self._tts is None:
+            return
+        try:
+            await self._tts.speak(text)
+        except BaseException as exc:
+            # Never include the status text in logs; operational metadata is enough.
+            LOGGER.info("event=tts_speak_failed error_type=%s", type(exc).__name__)
+
+    async def _safe_cancel_recorder(self) -> None:
+        try:
+            assert self._recorder is not None
+            await self._recorder.cancel()
+        except BaseException as exc:
+            LOGGER.info("event=recording_cancel_failed error_type=%s", type(exc).__name__)
+
+    @staticmethod
+    def _safe_cleanup_recording(recording: Recording) -> None:
+        try:
+            recording.cleanup()
+        except OSError as exc:
+            # Do not log the request-scoped filename.
+            LOGGER.info("event=recording_cleanup_failed error_type=%s", type(exc).__name__)
+
+    async def _safe_clear_watch(self) -> None:
         try:
             await self._focus.clear_watch()
         except FocusError:
             LOGGER.exception("event=focus_watch_clear_failed")
 
     def _set_state(self, state: RequestState) -> None:
-        """Record a metadata-only state transition."""
-
         self.state = state
         LOGGER.info("event=request_state state=%s", state.value)
 
     def _finish(self, outcome: RequestState) -> None:
-        """Remember the terminal outcome and return the controller to idle."""
-
         self._set_state(outcome)
         self.last_outcome = outcome
-        self._set_state(RequestState.IDLE)
