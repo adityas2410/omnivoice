@@ -6,7 +6,11 @@ from omnivoice.config import ConfigError, OmniVoiceConfig, config_for_logging, l
 
 
 def test_missing_default_config_uses_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("APPDATA", str(tmp_path))
+    app_data = tmp_path / "appdata"
+    working_directory = tmp_path / "working"
+    working_directory.mkdir()
+    monkeypatch.setenv("APPDATA", str(app_data))
+    monkeypatch.chdir(working_directory)
 
     config, loaded = load_config()
 
@@ -18,6 +22,48 @@ def test_missing_default_config_uses_defaults(monkeypatch: pytest.MonkeyPatch, t
     assert config.speech.stt.model == "small.en"
     assert config.speech.tts.voice == "Microsoft Zira Desktop"
     assert config.speech.recording.max_seconds == 30.0
+
+
+def test_project_config_is_loaded_before_user_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "project"
+    app_data = tmp_path / "appdata"
+    user_directory = app_data / "OmniVoice"
+    project.mkdir()
+    user_directory.mkdir(parents=True)
+    (project / "config.yaml").write_text(
+        "hotkey:\n  push_to_talk: f8\n", encoding="utf-8"
+    )
+    (user_directory / "config.yaml").write_text(
+        "hotkey:\n  push_to_talk: f9\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("APPDATA", str(app_data))
+
+    config, loaded = load_config()
+
+    assert loaded == project / "config.yaml"
+    assert config.hotkey.push_to_talk == "f8"
+
+
+def test_user_config_is_fallback_when_project_config_is_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    project = tmp_path / "project"
+    app_data = tmp_path / "appdata"
+    user_directory = app_data / "OmniVoice"
+    project.mkdir()
+    user_directory.mkdir(parents=True)
+    user_config = user_directory / "config.yaml"
+    user_config.write_text("hotkey:\n  push_to_talk: f9\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("APPDATA", str(app_data))
+
+    config, loaded = load_config()
+
+    assert loaded == user_config
+    assert config.hotkey.push_to_talk == "f9"
 
 
 def test_explicit_config_is_loaded(tmp_path: Path) -> None:

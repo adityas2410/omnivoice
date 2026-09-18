@@ -121,7 +121,10 @@ Pass a file explicitly:
 omnivoice --config C:\path\to\config.yaml
 ```
 
-Without `--config`, OmniVoice reads `%APPDATA%\OmniVoice\config.yaml`. If it is absent, built-in defaults are used and no file is created. `config.example.yaml` contains every setting:
+Without `--config`, OmniVoice first reads `config.yaml` from the current project
+directory. If it is absent, `%APPDATA%\OmniVoice\config.yaml` is used as a
+fallback. The tracked project `config.yaml` contains every setting and is the
+normal place to add or remove named model profiles:
 
 ```yaml
 agent:

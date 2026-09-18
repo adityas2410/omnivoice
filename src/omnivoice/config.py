@@ -149,7 +149,7 @@ class OmniVoiceConfig(BaseModel):
 
 
 def default_config_path() -> Path:
-    """Return the per-user Windows configuration location."""
+    """Return the fallback per-user Windows configuration location."""
 
     app_data = os.environ.get("APPDATA")
     if app_data:
@@ -158,9 +158,13 @@ def default_config_path() -> Path:
 
 
 def load_config(explicit_path: Path | None = None) -> tuple[OmniVoiceConfig, Path | None]:
-    """Load an explicit or user configuration, otherwise return safe defaults."""
+    """Load explicit, project, or user configuration in precedence order."""
 
-    path = explicit_path if explicit_path is not None else default_config_path()
+    if explicit_path is not None:
+        path = explicit_path
+    else:
+        project_path = Path.cwd() / "config.yaml"
+        path = project_path if project_path.exists() else default_config_path()
     if not path.exists():
         if explicit_path is not None:
             raise ConfigError(f"Configuration file does not exist: {path}")
