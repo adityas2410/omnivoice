@@ -1,43 +1,40 @@
 # OmniVoice
 
-OmniVoice is a Windows-first Python CLI for guarded keyboard automation. It combines a concurrent terminal, a global push-to-talk hotkey, focused editable-control validation, focus-change cancellation, and deliberately armed test typing.
+OmniVoice is a Windows-first, local voice-dictation CLI. It records English speech while a global push-to-talk hotkey is held, transcribes it with `whisper.cpp`, and types the literal transcript only if the original editable field still owns focus. Windows SAPI provides short status confirmations such as “Done.”
 
 ## Safety model
 
-OmniVoice binds every request to the supported editable control focused when the push-to-talk hotkey is released.
+Every request is bound before recording begins:
 
 ```text
-Hotkey released
-→ focused control validated with Windows UI Automation
-→ request bound to an opaque focus identity
-→ simulated processing delay
-→ focus revalidated
-→ armed test marker typed with SendInput
+Press hotkey
+→ validate and bind the focused control with Windows UI Automation
+→ hear a short ready beep
+→ record while the hotkey remains held
+→ transcribe locally after release
+→ revalidate focus and released modifiers
+→ type through guarded SendInput
 ```
 
-If the focused control changes, the remaining request is cancelled. OmniVoice never restores focus and never attempts an automatic rollback.
+Changing fields or windows cancels the remaining request. OmniVoice never restores focus and never attempts an automatic rollback. During insertion it checks the focus lease between logical characters and emits UTF-16 surrogate pairs atomically.
 
-Windows synthetic keyboard input is not transactional. There is an unavoidable, very small race between checking focus and Windows dispatching an input event. OmniVoice reduces this risk by monitoring UI Automation focus events and revalidating between logical characters.
+Windows synthetic keyboard input is not transactional, so a very small race remains between the final focus check and Windows dispatching an input event. UI Automation focus monitoring and repeated identity checks narrow that boundary.
 
 ## Supported targets
 
-OmniVoice accepts only controls that Windows UI Automation identifies unambiguously as:
+The focused control must be enabled, visible, keyboard-focusable, non-password, and unambiguously writable. Supported UI Automation surfaces include standard `Edit` controls, editable `ComboBox` controls with a writable `ValuePattern`, and writable `Document` controls with reliable `TextPattern` metadata.
 
-- Currently focused, enabled, visible, and keyboard-focusable
-- A standard `Edit`, editable `ComboBox`, or writable `Document` control
-- Writable through the pattern required for that control type: `ValuePattern` for editable combo boxes and `TextPattern` read-only metadata for document surfaces
-- Not a password field
+Selection-only combo boxes and read-only controls are rejected. Rich editors, VS Code editor surfaces, and browser `contenteditable` regions depend on the evidence exposed by their UI Automation provider.
 
-Selection-only combo boxes and read-only documents are rejected. Rich editors, VS Code editor surfaces, and browser `contenteditable` regions depend on whether their UI Automation provider exposes a supported focused control and unambiguously reports it as writable.
+OmniVoice normally cannot inject input into an application running at a higher Windows integrity level. Keep OmniVoice and its target at the same privilege level; do not elevate OmniVoice merely to bypass this protection.
 
-OmniVoice normally cannot inject input into an application running at a higher Windows integrity level. Run the target and OmniVoice at the same privilege level; do not elevate OmniVoice merely to bypass this protection.
-
-## Development setup
+## Installation
 
 Requirements:
 
 - Windows 11
 - CPython 3.13.5
+- Approximately 550 MB of free disk space for local speech assets
 
 Create and activate a project environment:
 
@@ -47,49 +44,72 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
-Run the CLI:
+Download and verify the pinned `whisper.cpp` `b5130` x64 BLAS package and English `small.en` model:
+
+```powershell
+omnivoice speech setup
+```
+
+The files are installed under `%LOCALAPPDATA%\OmniVoice\speech`. Startup never downloads them. Re-run the verified installation with:
+
+```powershell
+omnivoice speech setup --force
+```
+
+List PortAudio microphone identifiers and names when selecting a non-default input:
+
+```powershell
+omnivoice speech devices
+```
+
+## Dictation
+
+Start the CLI:
 
 ```powershell
 omnivoice
 ```
 
-You can also run it as a module:
+Then:
 
-```powershell
-python -m omnivoice
-```
+1. Focus a supported text field.
+2. Press and hold `Ctrl+Alt+Space`.
+3. Wait for the short ready beep, then speak.
+4. Release `Space` to stop recording while releasing `Ctrl` and `Alt` normally.
+5. Keep focus on the same field during local transcription and insertion.
+
+Recording stops accepting audio after 30 seconds and waits for hotkey release before transcription. Silent or empty audio is discarded. A transcript containing a NUL character, no text, or more than 2,000 characters is rejected.
+
+On the documented CPU-only baseline, local transcription can take time after the hotkey is released. `/cancel` remains available throughout recording, transcription, and typing.
 
 ## Guarded self-test
 
-Real keyboard input is disabled unless the one-shot self-test is explicitly armed.
+The fixed marker test bypasses the microphone and STT provider while exercising the same focus lease and guarded keyboard path:
 
-1. Start OmniVoice in a terminal.
-2. Enter `/selftest arm`.
-3. Within 30 seconds, focus a supported empty text field.
-4. Hold and release `Ctrl+Alt+Space`.
-5. Keep focus on that field for the two-second simulated processing delay.
+1. Enter `/selftest arm`.
+2. Within 30 seconds, focus a supported empty field.
+3. Hold `Ctrl+Alt+Space` until OmniVoice confirms that the target is bound, then release it.
+4. Keep focus unchanged for the two-second diagnostic delay.
 
-If validation succeeds and focus stays unchanged, OmniVoice types:
+The test types:
 
 ```text
 [OmniVoice safety test]
 ```
 
-The arm is consumed by the attempt whether it succeeds or fails. Without arming, the hotkey performs validation only and never types.
-
-To test focus protection, arm the self-test, release the hotkey over a supported field, and switch to another field during the two-second delay. OmniVoice must cancel without typing.
+Authorization is one-shot and is consumed by the attempt, including a rejected or cancelled attempt.
 
 ## Terminal commands
 
 ```text
 /help          Show command help
-/status        Show the current request, configuration, and arming state
-/selftest arm  Permit one guarded test insertion for 30 seconds
-/cancel        Cancel the active request
-/quit          Shut down and unregister Windows handlers
+/status        Show request, provider, voice, microphone, and self-test state
+/selftest arm  Permit one guarded fixed-marker insertion for 30 seconds
+/cancel        Cancel recording, transcription, processing, or typing
+/quit          Shut down and unregister all workers and Windows handlers
 ```
 
-The terminal uses `prompt_toolkit`, so background hotkey and request statuses are rendered without discarding an unfinished command line.
+`prompt_toolkit` preserves unfinished terminal input while background statuses are printed.
 
 ## Configuration
 
@@ -99,28 +119,61 @@ Pass a file explicitly:
 omnivoice --config C:\path\to\config.yaml
 ```
 
-Without `--config`, OmniVoice reads `%APPDATA%\OmniVoice\config.yaml`. If that file is absent, it uses built-in defaults and does not create a file. See `config.example.yaml`:
+Without `--config`, OmniVoice reads `%APPDATA%\OmniVoice\config.yaml`. If it is absent, built-in defaults are used and no file is created. `config.example.yaml` contains every setting:
 
 ```yaml
 hotkey:
   push_to_talk: "ctrl+alt+space"
+
+speech:
+  stt:
+    enabled: true
+    provider: "whisper_cpp"
+    model: "small.en"
+    language: "en"
+    timeout_seconds: 60
+    threads: null
+    executable_path: null
+    model_path: null
+  tts:
+    enabled: true
+    provider: "windows_sapi"
+    voice: "Microsoft Zira Desktop"
+    rate: 0
+    volume: 100
+  microphone:
+    device: null
+  recording:
+    max_seconds: 30
+    sample_rate: 16000
+    minimum_seconds: 0.15
+    silence_rms_threshold: 80
 ```
+
+`threads: null` chooses a bounded value from the available CPU count. `device: null` uses the Windows default input. A device may instead be a numeric identifier or exact name from `omnivoice speech devices`. `executable_path` and `model_path` override the managed assets.
+
+STT and TTS can be disabled independently. With STT disabled or unavailable, the CLI and guarded self-test still run. If the configured SAPI voice is missing, OmniVoice warns and uses the Windows default voice. TTS failures never change a successful keyboard outcome.
 
 Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plus exactly one letter, digit, function key, or supported named key. F12 is rejected because Windows reserves it for debugging.
 
+## Privacy and logs
+
+Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. No speech API is contacted.
+
+Operational logs contain provider and model names, timings, state changes, byte and character counts, control metadata, and error categories. They do not contain audio, transcript text, spoken status content, focused-control contents, generated files, subprocess output, or temporary filenames.
+
 ## Testing
 
-The default suite uses fake focus and input backends and never sends global keyboard input:
+The default suite uses fake microphone, STT, TTS, focus, and keyboard backends. It does not record audio, play speech, contact the network, or type globally:
 
 ```powershell
-pytest
+python -m pytest
 ```
 
-Desktop integration tests are opt-in because they register a real global hotkey and initialize desktop UI Automation:
+Desktop integration checks are opt-in:
 
 ```powershell
 $env:OMNIVOICE_WINDOWS_INTEGRATION = "1"
-pytest -m windows_integration
+python -m pytest -m windows_integration
+Remove-Item Env:OMNIVOICE_WINDOWS_INTEGRATION
 ```
-
-Operational logs contain state changes, timings, process IDs, window handles, control types, and error categories. They do not contain focused text or generated keystroke contents.

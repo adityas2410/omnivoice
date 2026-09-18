@@ -1,2 +1,26 @@
 hotkey:
   push_to_talk: "ctrl+alt+space"
+
+speech:
+  stt:
+    enabled: true
+    provider: "whisper_cpp"
+    model: "small.en"
+    language: "en"
+    timeout_seconds: 60
+    threads: null
+    executable_path: null
+    model_path: null
+  tts:
+    enabled: true
+    provider: "windows_sapi"
+    voice: "Microsoft Zira Desktop"
+    rate: 0
+    volume: 100
+  microphone:
+    device: null
+  recording:
+    max_seconds: 30
+    sample_rate: 16000
+    minimum_seconds: 0.15
+    silence_rms_threshold: 80
