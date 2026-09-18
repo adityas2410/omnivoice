@@ -11,8 +11,12 @@ def test_missing_default_config_uses_defaults(monkeypatch: pytest.MonkeyPatch, t
     config, loaded = load_config()
 
     assert loaded is None
-    assert config.agent.default_model is None
-    assert config.agent.models == {}
+    assert config.agent.default_model == "groq-fast"
+    assert config.agent.models == {
+        "groq-fast": "groq:openai/gpt-oss-20b",
+        "groq-large": "groq:openai/gpt-oss-120b",
+        "ollama-local": "ollama:qwen3:8b",
+    }
     assert config.hotkey.push_to_talk == "ctrl+alt+space"
     assert config.speech.stt.provider == "whisper_cpp"
     assert config.speech.stt.model == "small.en"
@@ -28,6 +32,7 @@ def test_explicit_config_is_loaded(tmp_path: Path) -> None:
 
     assert loaded == path
     assert config.hotkey.push_to_talk == "f8"
+    assert config.agent.default_model == "groq-fast"
 
 
 def test_missing_explicit_config_fails(tmp_path: Path) -> None:
@@ -97,11 +102,21 @@ def test_logging_view_contains_metadata_but_not_paths() -> None:
     config = OmniVoiceConfig()
     logged = config_for_logging(config)
 
-    assert logged["agent_default_model"] is None
-    assert logged["agent_model_count"] == 0
+    assert logged["agent_default_model"] == "groq-fast"
+    assert logged["agent_model_count"] == 3
     assert logged["stt_provider"] == "whisper_cpp"
     assert "executable_path" not in logged
     assert "model_path" not in logged
+
+
+def test_explicit_empty_agent_configuration_disables_models(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("agent: {}\n", encoding="utf-8")
+
+    config, _ = load_config(path)
+
+    assert config.agent.default_model is None
+    assert config.agent.models == {}
 
 
 def test_named_agent_models_load_in_yaml_order(tmp_path: Path) -> None:

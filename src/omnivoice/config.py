@@ -73,6 +73,19 @@ class AgentConfig(BaseModel):
         return self
 
 
+def default_agent_config() -> AgentConfig:
+    """Provide useful built-in profiles when no agent YAML is supplied."""
+
+    return AgentConfig(
+        default_model="groq-fast",
+        models={
+            "groq-fast": "groq:openai/gpt-oss-20b",
+            "groq-large": "groq:openai/gpt-oss-120b",
+            "ollama-local": "ollama:qwen3:8b",
+        },
+    )
+
+
 class HotkeyConfig(BaseModel):
     """Configure the single global push-to-talk chord."""
 
@@ -143,7 +156,7 @@ class OmniVoiceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    agent: AgentConfig = Field(default_factory=AgentConfig)
+    agent: AgentConfig = Field(default_factory=default_agent_config)
     hotkey: HotkeyConfig = Field(default_factory=HotkeyConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
 

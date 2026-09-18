@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from omnivoice.cli import HELP, CommandDispatcher
-from omnivoice.config import AgentConfig
+from omnivoice.config import AgentConfig, OmniVoiceConfig
 from omnivoice.interaction import RequestState
 from omnivoice.models import ModelRegistry
 
@@ -69,6 +69,24 @@ def test_models_lists_current_and_default_without_provider_access() -> None:
         "  groq-fast: groq:openai/gpt-oss-20b [current, default]\n"
         "  ollama-local: ollama:qwen3:8b"
     ]
+
+
+def test_models_uses_built_in_profiles_without_user_config() -> None:
+    models = ModelRegistry(OmniVoiceConfig().agent)
+    statuses: list[str] = []
+    dispatcher = CommandDispatcher(
+        FakeController(),  # type: ignore[arg-type]
+        lambda: "runtime=ready",
+        models,
+        statuses.append,
+        lambda text: None,
+    )
+
+    dispatcher.dispatch("/models")
+
+    assert "groq-fast: groq:openai/gpt-oss-20b [current, default]" in statuses[0]
+    assert "groq-large: groq:openai/gpt-oss-120b" in statuses[0]
+    assert "ollama-local: ollama:qwen3:8b" in statuses[0]
 
 
 def test_model_switch_updates_status_but_not_default() -> None:
