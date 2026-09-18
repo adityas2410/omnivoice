@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class ConfigError(RuntimeError):
@@ -15,11 +23,54 @@ class ConfigError(RuntimeError):
 
 
 class AgentConfig(BaseModel):
-    """Validate the optional agent selector without activating an agent."""
+    """Validate named agent models without contacting their providers."""
 
     model_config = ConfigDict(extra="forbid")
 
-    model: str | None = None
+    default_model: str | None = None
+    models: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("models")
+    @classmethod
+    def validate_models(cls, models: dict[str, str]) -> dict[str, str]:
+        """Keep aliases predictable and selectors provider-qualified."""
+
+        for alias, selector in models.items():
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", alias):
+                raise ValueError(
+                    "model aliases must contain only lowercase letters, digits, "
+                    "hyphens, or underscores"
+                )
+            if selector != selector.strip() or any(
+                char.isspace() for char in selector
+            ):
+                raise ValueError(f"model selector for {alias!r} must not contain whitespace")
+            provider, separator, model_name = selector.partition(":")
+            if not separator or not model_name:
+                raise ValueError(
+                    f"model selector for {alias!r} must use '<provider>:<model>'"
+                )
+            if provider not in {"groq", "ollama"}:
+                raise ValueError(
+                    f"model selector for {alias!r} uses unsupported provider {provider!r}"
+                )
+        return models
+
+    @model_validator(mode="after")
+    def validate_default_model(self) -> AgentConfig:
+        """Require configured profiles to have one valid startup default."""
+
+        if not self.models:
+            if self.default_model is not None:
+                raise ValueError(
+                    "default_model cannot be set when no agent models are configured"
+                )
+            return self
+        if self.default_model is None:
+            raise ValueError("default_model is required when agent models are configured")
+        if self.default_model not in self.models:
+            raise ValueError("default_model must name an entry in agent.models")
+        return self
 
 
 class HotkeyConfig(BaseModel):
@@ -135,6 +186,8 @@ def config_for_logging(config: OmniVoiceConfig) -> dict[str, Any]:
     """Return the non-secret runtime fields that are safe to log."""
 
     return {
+        "agent_default_model": config.agent.default_model,
+        "agent_model_count": len(config.agent.models),
         "push_to_talk": config.hotkey.push_to_talk,
         "stt_enabled": config.speech.stt.enabled,
         "stt_provider": config.speech.stt.provider,
