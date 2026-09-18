@@ -104,6 +104,8 @@ Authorization is one-shot and is consumed by the attempt, including a rejected o
 ```text
 /help          Show command help
 /status        Show request, provider, voice, microphone, and self-test state
+/models        Show agent models configured in YAML
+/model NAME    Select an agent model for this session
 /selftest arm  Permit one guarded fixed-marker insertion for 30 seconds
 /cancel        Cancel recording, transcription, processing, or typing
 /quit          Shut down and unregister all workers and Windows handlers
@@ -122,6 +124,13 @@ omnivoice --config C:\path\to\config.yaml
 Without `--config`, OmniVoice reads `%APPDATA%\OmniVoice\config.yaml`. If it is absent, built-in defaults are used and no file is created. `config.example.yaml` contains every setting:
 
 ```yaml
+agent:
+  default_model: "groq-fast"
+  models:
+    groq-fast: "groq:openai/gpt-oss-20b"
+    groq-large: "groq:openai/gpt-oss-120b"
+    ollama-local: "ollama:qwen3:8b"
+
 hotkey:
   push_to_talk: "ctrl+alt+space"
 
@@ -149,6 +158,14 @@ speech:
     minimum_seconds: 0.15
     silence_rms_threshold: 80
 ```
+
+Agent models use named profiles so `/model NAME` can change the active model for
+the current process. `default_model` is restored whenever OmniVoice starts and
+must name an entry in `models`; runtime switching never rewrites the YAML file.
+`/models` only displays configured profiles and does not contact Groq or Ollama.
+Groq reads `GROQ_API_KEY` from the process environment. Local Ollama uses its
+OpenAI-compatible endpoint at `http://localhost:11434/v1` and needs no API key.
+An empty `agent` configuration remains valid while AI actions are unavailable.
 
 `threads: null` chooses a bounded value from the available CPU count. `device: null` uses the Windows default input. A device may instead be a numeric identifier or exact name from `omnivoice speech devices`. `executable_path` and `model_path` override the managed assets.
 

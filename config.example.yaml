@@ -1,3 +1,10 @@
+agent:
+  default_model: "groq-fast"
+  models:
+    groq-fast: "groq:openai/gpt-oss-20b"
+    groq-large: "groq:openai/gpt-oss-120b"
+    ollama-local: "ollama:qwen3:8b"
+
 hotkey:
   push_to_talk: "ctrl+alt+space"
 
