@@ -1,22 +1,31 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from omnivoice.config import ConfigError, OmniVoiceConfig, config_for_logging, load_config
 
 
-def test_missing_default_config_uses_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_missing_default_config_is_created_with_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     app_data = tmp_path / "appdata"
-    working_directory = tmp_path / "working"
-    working_directory.mkdir()
     monkeypatch.setenv("APPDATA", str(app_data))
-    monkeypatch.chdir(working_directory)
 
     config, loaded = load_config()
 
-    assert loaded is None
-    assert config.agent.default_model is None
-    assert config.agent.models == {}
+    expected_path = app_data / "OmniVoice" / "config.yaml"
+    assert loaded == expected_path
+    assert expected_path.exists()
+    assert config.agent.default_model == "groq-fast"
+    assert config.agent.models == {
+        "groq-fast": "groq:openai/gpt-oss-20b",
+        "groq-large": "groq:openai/gpt-oss-120b",
+        "ollama-local": "ollama:qwen3:8b",
+    }
+    written = yaml.safe_load(expected_path.read_text(encoding="utf-8"))
+    assert written["agent"]["default_model"] == "groq-fast"
+    assert written["agent"]["models"] == config.agent.models
     assert config.hotkey.push_to_talk == "ctrl+alt+space"
     assert config.speech.stt.provider == "whisper_cpp"
     assert config.speech.stt.model == "small.en"
@@ -24,40 +33,14 @@ def test_missing_default_config_uses_defaults(monkeypatch: pytest.MonkeyPatch, t
     assert config.speech.recording.max_seconds == 30.0
 
 
-def test_project_config_is_loaded_before_user_config(
+def test_existing_user_config_is_loaded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    project = tmp_path / "project"
     app_data = tmp_path / "appdata"
     user_directory = app_data / "OmniVoice"
-    project.mkdir()
-    user_directory.mkdir(parents=True)
-    (project / "config.yaml").write_text(
-        "hotkey:\n  push_to_talk: f8\n", encoding="utf-8"
-    )
-    (user_directory / "config.yaml").write_text(
-        "hotkey:\n  push_to_talk: f9\n", encoding="utf-8"
-    )
-    monkeypatch.chdir(project)
-    monkeypatch.setenv("APPDATA", str(app_data))
-
-    config, loaded = load_config()
-
-    assert loaded == project / "config.yaml"
-    assert config.hotkey.push_to_talk == "f8"
-
-
-def test_user_config_is_fallback_when_project_config_is_absent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    project = tmp_path / "project"
-    app_data = tmp_path / "appdata"
-    user_directory = app_data / "OmniVoice"
-    project.mkdir()
     user_directory.mkdir(parents=True)
     user_config = user_directory / "config.yaml"
     user_config.write_text("hotkey:\n  push_to_talk: f9\n", encoding="utf-8")
-    monkeypatch.chdir(project)
     monkeypatch.setenv("APPDATA", str(app_data))
 
     config, loaded = load_config()
@@ -143,8 +126,8 @@ def test_logging_view_contains_metadata_but_not_paths() -> None:
     config = OmniVoiceConfig()
     logged = config_for_logging(config)
 
-    assert logged["agent_default_model"] is None
-    assert logged["agent_model_count"] == 0
+    assert logged["agent_default_model"] == "groq-fast"
+    assert logged["agent_model_count"] == 3
     assert logged["stt_provider"] == "whisper_cpp"
     assert "executable_path" not in logged
     assert "model_path" not in logged

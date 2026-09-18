@@ -73,6 +73,19 @@ class AgentConfig(BaseModel):
         return self
 
 
+def default_agent_config() -> AgentConfig:
+    """Return the model profiles written into a new user configuration."""
+
+    return AgentConfig(
+        default_model="groq-fast",
+        models={
+            "groq-fast": "groq:openai/gpt-oss-20b",
+            "groq-large": "groq:openai/gpt-oss-120b",
+            "ollama-local": "ollama:qwen3:8b",
+        },
+    )
+
+
 class HotkeyConfig(BaseModel):
     """Configure the single global push-to-talk chord."""
 
@@ -143,13 +156,13 @@ class OmniVoiceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    agent: AgentConfig = Field(default_factory=AgentConfig)
+    agent: AgentConfig = Field(default_factory=default_agent_config)
     hotkey: HotkeyConfig = Field(default_factory=HotkeyConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
 
 
 def default_config_path() -> Path:
-    """Return the fallback per-user Windows configuration location."""
+    """Return the per-user Windows configuration location."""
 
     app_data = os.environ.get("APPDATA")
     if app_data:
@@ -158,17 +171,29 @@ def default_config_path() -> Path:
 
 
 def load_config(explicit_path: Path | None = None) -> tuple[OmniVoiceConfig, Path | None]:
-    """Load explicit, project, or user configuration in precedence order."""
+    """Load a config or create a discoverable per-user config on first launch."""
 
-    if explicit_path is not None:
-        path = explicit_path
-    else:
-        project_path = Path.cwd() / "config.yaml"
-        path = project_path if project_path.exists() else default_config_path()
+    path = explicit_path if explicit_path is not None else default_config_path()
     if not path.exists():
         if explicit_path is not None:
             raise ConfigError(f"Configuration file does not exist: {path}")
-        return OmniVoiceConfig(), None
+        config = OmniVoiceConfig()
+        serialized = yaml.safe_dump(
+            config.model_dump(mode="json"),
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("x", encoding="utf-8", newline="\n") as config_file:
+                config_file.write(serialized)
+        except FileExistsError:
+            # Another process completed first-run setup; validate its file below.
+            pass
+        except OSError as exc:
+            raise ConfigError(f"Could not create configuration {path}: {exc}") from exc
+        else:
+            return config, path
 
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))

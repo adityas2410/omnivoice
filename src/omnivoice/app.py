@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from omnivoice.cli import Console
-from omnivoice.config import ConfigError, load_config
+from omnivoice.config import ConfigError, default_config_path, load_config
 from omnivoice.interaction import InteractionController
 from omnivoice.models import ModelRegistry
 from omnivoice.speech.audio import SoundDeviceRecorder, list_input_devices
@@ -53,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace an existing installation after new downloads verify",
     )
     speech_commands.add_parser("devices", help="List available microphone inputs")
+    config = commands.add_parser("config", help="Inspect configuration locations")
+    config_commands = config.add_subparsers(dest="config_command", required=True)
+    config_commands.add_parser("path", help="Print the user configuration path")
     return parser
 
 
@@ -222,6 +225,15 @@ def _run_speech_command(args: argparse.Namespace) -> int:
     raise ConfigError("Unknown speech command")
 
 
+def _run_config_command(args: argparse.Namespace) -> int:
+    """Expose configuration discovery without starting Windows services."""
+
+    if args.config_command == "path":
+        print(default_config_path())
+        return 0
+    raise ConfigError("Unknown config command")
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse startup options, configure metadata logging, and run the CLI."""
 
@@ -234,6 +246,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     try:
         if args.command == "speech":
             exit_code = _run_speech_command(args)
+        elif args.command == "config":
+            exit_code = _run_config_command(args)
         else:
             exit_code = asyncio.run(run(args))
     except (

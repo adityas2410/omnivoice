@@ -115,16 +115,17 @@ Authorization is one-shot and is consumed by the attempt, including a rejected o
 
 ## Configuration
 
-Pass a file explicitly:
+On first launch, OmniVoice automatically creates
+`%APPDATA%\OmniVoice\config.yaml` with every setting and prints that path during
+startup. This per-user file is the normal place to add or remove named model
+profiles for both packaged and source installations. Its location is always
+available through:
 
 ```powershell
-omnivoice --config C:\path\to\config.yaml
+omnivoice config path
 ```
 
-Without `--config`, OmniVoice first reads `config.yaml` from the current project
-directory. If it is absent, `%APPDATA%\OmniVoice\config.yaml` is used as a
-fallback. The tracked project `config.yaml` contains every setting and is the
-normal place to add or remove named model profiles:
+The generated file looks like:
 
 ```yaml
 agent:
@@ -169,6 +170,9 @@ must name an entry in `models`; runtime switching never rewrites the YAML file.
 Groq reads `GROQ_API_KEY` from the process environment. Local Ollama uses its
 OpenAI-compatible endpoint at `http://localhost:11434/v1` and needs no API key.
 An empty `agent` configuration remains valid while AI actions are unavailable.
+
+Pass `--config C:\path\to\config.yaml` only when intentionally using a
+different file.
 
 `threads: null` chooses a bounded value from the available CPU count. `device: null` uses the Windows default input. A device may instead be a numeric identifier or exact name from `omnivoice speech devices`. `executable_path` and `model_path` override the managed assets.
 
