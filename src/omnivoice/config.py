@@ -26,17 +26,15 @@ class ConfigError(RuntimeError):
 CONFIG_HEADER = """# OmniVoice configuration.
 # Add model profiles under agent.models as: alias: "provider:model-name"
 # Set agent.default_model to one of those aliases.
+# Provider mapping: groq:... uses GROQ_API_KEY; local ollama:... uses no key.
 # API keys belong in %APPDATA%\\OmniVoice\\.env, never in this YAML file.
 
 """
 
 CREDENTIALS_TEMPLATE = """# OmniVoice provider credentials. Keep this file private.
-# Groq-hosted models use this key:
-GROQ_API_KEY=
-
-# Local Ollama at http://localhost:11434 needs no API key.
-# Reserved for optional Ollama Cloud support:
-OLLAMA_API_KEY=
+# Add only keys required by providers selected in config.yaml.
+# Example: a groq:... model reads GROQ_API_KEY from this file.
+# Local ollama:... models need no API key.
 """
 
 
@@ -89,19 +87,6 @@ class AgentConfig(BaseModel):
         if self.default_model not in self.models:
             raise ValueError("default_model must name an entry in agent.models")
         return self
-
-
-def default_agent_config() -> AgentConfig:
-    """Return the model profiles written into a new user configuration."""
-
-    return AgentConfig(
-        default_model="groq-fast",
-        models={
-            "groq-fast": "groq:openai/gpt-oss-20b",
-            "groq-large": "groq:openai/gpt-oss-120b",
-            "ollama-local": "ollama:qwen3:8b",
-        },
-    )
 
 
 class HotkeyConfig(BaseModel):
@@ -174,7 +159,7 @@ class OmniVoiceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    agent: AgentConfig = Field(default_factory=default_agent_config)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     hotkey: HotkeyConfig = Field(default_factory=HotkeyConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
 

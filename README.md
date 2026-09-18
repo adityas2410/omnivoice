@@ -129,11 +129,8 @@ The generated file looks like:
 
 ```yaml
 agent:
-  default_model: "groq-fast"
-  models:
-    groq-fast: "groq:openai/gpt-oss-20b"
-    groq-large: "groq:openai/gpt-oss-120b"
-    ollama-local: "ollama:qwen3:8b"
+  default_model: null
+  models: {}
 
 hotkey:
   push_to_talk: "ctrl+alt+space"
@@ -163,16 +160,29 @@ speech:
     silence_rms_threshold: 80
 ```
 
+Fresh installations intentionally contain no model assumptions, so `/models`
+reports no configured models. Add named profiles and choose one default, for
+example:
+
+```yaml
+agent:
+  default_model: "groq-fast"
+  models:
+    groq-fast: "groq:openai/gpt-oss-20b"
+    ollama-local: "ollama:qwen3:8b"
+```
+
 Agent models use named profiles so `/model NAME` can change the active model for
 the current process. `default_model` is restored whenever OmniVoice starts and
 must name an entry in `models`; runtime switching never rewrites the YAML file.
 `/models` only displays configured profiles and does not contact Groq or Ollama.
-OmniVoice also creates `%APPDATA%\OmniVoice\.env` with `GROQ_API_KEY=` and
-`OLLAMA_API_KEY=` placeholders and prints that path during startup. Provider keys
-go there, not in `config.yaml`. A `.env` in the current working directory is
-also loaded for source-development workflows. Existing process environment
-variables take precedence. Local Ollama uses its OpenAI-compatible endpoint at
-`http://localhost:11434/v1` and needs no API key.
+OmniVoice also creates an instruction-only `%APPDATA%\OmniVoice\.env` and prints
+that path during startup. Model selectors determine credential lookup:
+`groq:...` reads `GROQ_API_KEY`, while local `ollama:...` uses its
+OpenAI-compatible endpoint at `http://localhost:11434/v1` and needs no key. Add
+only the provider keys you use. A `.env` in the current working directory is
+also loaded for source-development workflows, and existing process environment
+variables take precedence.
 An empty `agent` configuration remains valid while AI actions are unavailable.
 
 Pass `--config C:\path\to\config.yaml` only when intentionally using a
