@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "omnivoice"
-version = "0.1.0"
+version = "0.2.0"
 description = "Universal voice AI agent for keyboard operations."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,7 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "pydantic>=2.10",
     "PyYAML>=6.0.2",
+    "sounddevice>=0.5.6",
 ]
 
 [project.optional-dependencies]

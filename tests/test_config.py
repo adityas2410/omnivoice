@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from omnivoice.config import ConfigError, load_config
+from omnivoice.config import ConfigError, OmniVoiceConfig, config_for_logging, load_config
 
 
 def test_missing_default_config_uses_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -12,6 +12,10 @@ def test_missing_default_config_uses_defaults(monkeypatch: pytest.MonkeyPatch, t
 
     assert loaded is None
     assert config.hotkey.push_to_talk == "ctrl+alt+space"
+    assert config.speech.stt.provider == "whisper_cpp"
+    assert config.speech.stt.model == "small.en"
+    assert config.speech.tts.voice == "Microsoft Zira Desktop"
+    assert config.speech.recording.max_seconds == 30.0
 
 
 def test_explicit_config_is_loaded(tmp_path: Path) -> None:
@@ -35,3 +39,62 @@ def test_unknown_configuration_key_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="Invalid configuration"):
         load_config(path)
+
+
+def test_speech_components_can_be_disabled_and_overridden(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+speech:
+  stt:
+    enabled: false
+    executable_path: C:/tools/whisper-cli.exe
+    model_path: C:/models/custom.bin
+    threads: 4
+  tts:
+    enabled: false
+    voice: Microsoft David Desktop
+  microphone:
+    device: 3
+  recording:
+    max_seconds: 12
+""",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(path)
+
+    assert not config.speech.stt.enabled
+    assert config.speech.stt.threads == 4
+    assert config.speech.stt.executable_path == Path("C:/tools/whisper-cli.exe")
+    assert not config.speech.tts.enabled
+    assert config.speech.microphone.device == 3
+    assert config.speech.recording.max_seconds == 12
+
+
+@pytest.mark.parametrize(
+    "yaml_text",
+    [
+        "speech:\n  stt:\n    timeout_seconds: 0\n",
+        "speech:\n  stt:\n    threads: 0\n",
+        "speech:\n  tts:\n    volume: 101\n",
+        "speech:\n  recording:\n    max_seconds: 0\n",
+        "speech:\n  stt:\n    provider: unknown\n",
+        "speech:\n  tts:\n    provider: unknown\n",
+    ],
+)
+def test_invalid_speech_configuration_fails(tmp_path: Path, yaml_text: str) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml_text, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Invalid configuration"):
+        load_config(path)
+
+
+def test_logging_view_contains_metadata_but_not_paths() -> None:
+    config = OmniVoiceConfig()
+    logged = config_for_logging(config)
+
+    assert logged["stt_provider"] == "whisper_cpp"
+    assert "executable_path" not in logged
+    assert "model_path" not in logged
