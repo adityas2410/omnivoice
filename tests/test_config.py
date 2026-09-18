@@ -35,6 +35,8 @@ def test_missing_default_config_is_created_without_assumed_models(
     assert written["agent"]["default_model"] is None
     assert written["agent"]["models"] == {}
     assert config.hotkey.push_to_talk == "ctrl+alt+space"
+    assert config.hotkey.agent_push_to_talk == "ctrl+alt+shift+space"
+    assert written["hotkey"]["agent_push_to_talk"] == "ctrl+alt+shift+space"
     assert config.speech.stt.provider == "whisper_cpp"
     assert config.speech.stt.model == "small.en"
     assert config.speech.tts.voice == "Microsoft Zira Desktop"
@@ -160,6 +162,7 @@ def test_logging_view_contains_metadata_but_not_paths() -> None:
     assert logged["agent_default_model"] is None
     assert logged["agent_model_count"] == 0
     assert logged["stt_provider"] == "whisper_cpp"
+    assert logged["agent_push_to_talk"] == "ctrl+alt+shift+space"
     assert "executable_path" not in logged
     assert "model_path" not in logged
 
@@ -216,4 +219,23 @@ def test_invalid_agent_model_configuration_fails(
     path.write_text(yaml_text, encoding="utf-8")
 
     with pytest.raises(ConfigError, match="Invalid configuration"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    "agent_hotkey",
+    ["ctrl+alt+space", "alt+ctrl+space", " CTRL + ALT + SPACE "],
+)
+def test_duplicate_dictation_and_agent_hotkeys_fail_during_config_loading(
+    tmp_path: Path, agent_hotkey: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "hotkey:\n"
+        "  push_to_talk: ctrl+alt+space\n"
+        f"  agent_push_to_talk: {agent_hotkey}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="must be different"):
         load_config(path)

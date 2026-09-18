@@ -90,11 +90,34 @@ class AgentConfig(BaseModel):
 
 
 class HotkeyConfig(BaseModel):
-    """Configure the single global push-to-talk chord."""
+    """Configure distinct literal-dictation and AI push-to-talk chords."""
 
     model_config = ConfigDict(extra="forbid")
 
     push_to_talk: str = "ctrl+alt+space"
+    agent_push_to_talk: str = "ctrl+alt+shift+space"
+
+    @model_validator(mode="after")
+    def validate_distinct_hotkeys(self) -> HotkeyConfig:
+        """Reject chords that Windows would treat as the same registration."""
+
+        if _normalized_hotkey(self.push_to_talk) == _normalized_hotkey(
+            self.agent_push_to_talk
+        ):
+            raise ValueError("push_to_talk and agent_push_to_talk must be different")
+        return self
+
+
+def _normalized_hotkey(value: str) -> tuple[frozenset[str], str]:
+    """Normalize modifier ordering for duplicate configuration detection."""
+
+    parts = [part.strip().lower() for part in value.split("+") if part.strip()]
+    modifiers = frozenset(
+        part for part in parts if part in {"ctrl", "alt", "shift", "win"}
+    )
+    triggers = [part for part in parts if part not in modifiers]
+    trigger = triggers[0] if len(triggers) == 1 else "\0".join(triggers)
+    return modifiers, trigger
 
 
 class STTConfig(BaseModel):
@@ -250,6 +273,7 @@ def config_for_logging(config: OmniVoiceConfig) -> dict[str, Any]:
         "agent_default_model": config.agent.default_model,
         "agent_model_count": len(config.agent.models),
         "push_to_talk": config.hotkey.push_to_talk,
+        "agent_push_to_talk": config.hotkey.agent_push_to_talk,
         "stt_enabled": config.speech.stt.enabled,
         "stt_provider": config.speech.stt.provider,
         "stt_model": config.speech.stt.model,

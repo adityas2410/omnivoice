@@ -13,10 +13,10 @@ from omnivoice.models import ModelRegistry, ModelSelectionError
 
 HELP = """Commands:
   /help          Show this help
-  /status        Show request, speech-provider, microphone, and self-test state
+  /status        Show hotkeys, model, request, speech, microphone, and self-test state
   /models        Show configured agent models
   /model NAME    Select an agent model for this session
-  /selftest arm  Permit one guarded test insertion for 30 seconds
+  /selftest arm  Permit one guarded dictation-hotkey test insertion for 30 seconds
   /cancel        Cancel the active request
   /quit          Shut down OmniVoice
 """

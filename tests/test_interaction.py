@@ -6,7 +6,16 @@ from pathlib import Path
 import pytest
 
 import omnivoice.interaction as interaction
-from omnivoice.interaction import InteractionController, RequestState, SELF_TEST_TEXT
+from omnivoice.actions import ActionPlan, InsertTextAction, ShortcutAction
+from omnivoice.config import AgentConfig
+from omnivoice.interaction import (
+    SELF_TEST_TEXT,
+    InteractionController,
+    RequestMode,
+    RequestState,
+)
+from omnivoice.models import ModelRegistry, ModelSelection
+from omnivoice.planning import PlanGenerationError
 from omnivoice.speech.ports import Readiness, Recording, SpeechToTextError
 from omnivoice.windows.focus import FocusLease
 from omnivoice.windows.keyboard import INPUT, KeyboardExecutor
@@ -140,6 +149,42 @@ class FakeCue:
         self.calls += 1
 
 
+class FakePlanner:
+    def __init__(self, plan: ActionPlan | None = None) -> None:
+        self.plan = plan if plan is not None else ActionPlan(actions=())
+        self.calls: list[tuple[str, ModelSelection]] = []
+        self.started = asyncio.Event()
+        self.wait_for_cancellation = False
+        self.error: Exception | None = None
+
+    async def generate(
+        self,
+        transcript: str,
+        selection: ModelSelection,
+        cancelled: asyncio.Event,
+    ) -> ActionPlan:
+        self.calls.append((transcript, selection))
+        self.started.set()
+        if self.wait_for_cancellation:
+            await cancelled.wait()
+            raise asyncio.CancelledError
+        if self.error is not None:
+            raise self.error
+        return self.plan
+
+
+def configured_models() -> ModelRegistry:
+    return ModelRegistry(
+        AgentConfig(
+            default_model="groq-fast",
+            models={
+                "groq-fast": "groq:openai/gpt-oss-20b",
+                "ollama-local": "ollama:qwen3:8b",
+            },
+        )
+    )
+
+
 async def wait_for_state(controller: InteractionController, state: RequestState) -> None:
     for _ in range(200):
         if controller.state is state:
@@ -165,6 +210,8 @@ def make_controller(
     stt: FakeSTT | None = None,
     tts: FakeTTS | None = None,
     statuses: list[str] | None = None,
+    planner: FakePlanner | None = None,
+    models: ModelRegistry | None = None,
 ) -> tuple[InteractionController, FakeBackend, FakeRecorder, FakeSTT, FakeTTS]:
     actual_backend = backend or FakeBackend()
     actual_recorder = recorder or FakeRecorder(tmp_path / "recording.wav")
@@ -179,6 +226,8 @@ def make_controller(
         stt=actual_stt,
         tts=actual_tts,
         ready_cue=FakeCue(),
+        planner=planner,
+        models=models,
     )
     return controller, actual_backend, actual_recorder, actual_stt, actual_tts
 
@@ -325,3 +374,270 @@ async def test_partial_input_fails_and_tts_failure_does_not_mask_outcome(
     await wait_until_idle(controller)
 
     assert controller.last_outcome is RequestState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_literal_dictation_never_calls_action_planner(tmp_path: Path) -> None:
+    planner = FakePlanner(
+        ActionPlan(actions=(ShortcutAction(type="shortcut", keys=("ctrl", "s")),))
+    )
+    controller, _, _, _, _ = make_controller(
+        tmp_path, planner=planner, models=configured_models()
+    )
+
+    controller.hotkey_pressed(RequestMode.DICTATION)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.DICTATION)
+    await wait_until_idle(controller)
+
+    assert planner.calls == []
+    assert controller.last_outcome is RequestState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_agent_request_executes_validated_text_and_shortcut(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                InsertTextAction(type="insert_text", text="hello"),
+                ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+            )
+        )
+    )
+    controller, backend, _, stt, tts = make_controller(
+        tmp_path, planner=planner, models=configured_models()
+    )
+
+    with caplog.at_level(logging.INFO):
+        controller.hotkey_pressed(RequestMode.AGENT)
+        await wait_for_state(controller, RequestState.LISTENING)
+        controller.hotkey_released(RequestMode.AGENT)
+        await wait_until_idle(controller)
+
+    assert planner.calls == [
+        (
+            stt.transcript,
+            ModelSelection("groq-fast", "groq:openai/gpt-oss-20b"),
+        )
+    ]
+    assert len(backend.sent) == len("hello") + 1
+    assert controller.last_outcome is RequestState.COMPLETED
+    assert tts.messages == ["Done."]
+    assert stt.transcript not in caplog.text
+    assert "hello" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_agent_without_configured_model_rejects_before_recording(
+    tmp_path: Path,
+) -> None:
+    statuses: list[str] = []
+    planner = FakePlanner()
+    controller, backend, recorder, stt, tts = make_controller(
+        tmp_path,
+        planner=planner,
+        models=ModelRegistry(AgentConfig()),
+        statuses=statuses,
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert planner.calls == []
+    assert not recorder.started
+    assert stt.calls == 0
+    assert backend.sent == []
+    assert any("No agent model" in status for status in statuses)
+    assert tts.messages == ["Request rejected."]
+
+
+@pytest.mark.asyncio
+async def test_unrelated_hotkey_release_cannot_stop_active_agent_recording(
+    tmp_path: Path,
+) -> None:
+    planner = FakePlanner(ActionPlan(actions=()))
+    controller, _, _, _, _ = make_controller(
+        tmp_path, planner=planner, models=configured_models()
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.DICTATION)
+    await asyncio.sleep(0.02)
+    assert controller.state is RequestState.LISTENING
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+
+@pytest.mark.asyncio
+async def test_model_selection_is_snapshotted_when_agent_hotkey_starts(
+    tmp_path: Path,
+) -> None:
+    models = configured_models()
+    planner = FakePlanner(ActionPlan(actions=()))
+    controller, _, _, _, _ = make_controller(
+        tmp_path, planner=planner, models=models
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    models.select("ollama-local")
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert planner.calls[0][1] == ModelSelection(
+        "groq-fast", "groq:openai/gpt-oss-20b"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_request_does_not_consume_dictation_self_test_arm(
+    tmp_path: Path,
+) -> None:
+    planner = FakePlanner(ActionPlan(actions=()))
+    controller, _, _, _, _ = make_controller(
+        tmp_path, planner=planner, models=configured_models()
+    )
+    controller.arm_self_test()
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert controller.is_armed
+
+
+@pytest.mark.asyncio
+async def test_focus_loss_during_planning_cancels_without_input(tmp_path: Path) -> None:
+    focus = FakeFocus()
+    planner = FakePlanner()
+    planner.wait_for_cancellation = True
+    controller, backend, _, _, tts = make_controller(
+        tmp_path, focus=focus, planner=planner, models=configured_models()
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await planner.started.wait()
+    controller.focus_lost(LEASE)
+    await wait_until_idle(controller)
+
+    assert backend.sent == []
+    assert controller.last_outcome is RequestState.CANCELLED
+    assert tts.messages == ["Cancelled."]
+
+
+@pytest.mark.asyncio
+async def test_whole_plan_policy_rejection_happens_before_first_action(
+    tmp_path: Path,
+) -> None:
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                InsertTextAction(type="insert_text", text="must not type"),
+                ShortcutAction(type="shortcut", keys=("alt", "f4")),
+            )
+        )
+    )
+    controller, backend, _, _, tts = make_controller(
+        tmp_path, planner=planner, models=configured_models()
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert backend.sent == []
+    assert controller.last_outcome is RequestState.CANCELLED
+    assert tts.messages == ["Request rejected."]
+
+
+@pytest.mark.asyncio
+async def test_focus_change_between_actions_stops_remaining_plan(tmp_path: Path) -> None:
+    focus = FakeFocus()
+
+    class FocusChangingBackend(FakeBackend):
+        def send(self, inputs: Sequence[INPUT]) -> int:
+            result = super().send(inputs)
+            focus.current = FocusLease((9, 9, 9), 900, 901, 50004)
+            return result
+
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                InsertTextAction(type="insert_text", text="a"),
+                ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+            )
+        )
+    )
+    backend = FocusChangingBackend()
+    controller, _, _, _, _ = make_controller(
+        tmp_path,
+        backend=backend,
+        focus=focus,
+        planner=planner,
+        models=configured_models(),
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert len(backend.sent) == 1
+    assert controller.last_outcome is RequestState.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_sends_no_input_and_uses_fixed_status(
+    tmp_path: Path,
+) -> None:
+    planner = FakePlanner()
+    planner.error = PlanGenerationError(
+        "Local Ollama request failed. Ensure Ollama is running and the selected model is installed."
+    )
+    controller, backend, _, _, tts = make_controller(
+        tmp_path, planner=planner, models=configured_models()
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert backend.sent == []
+    assert controller.last_outcome is RequestState.FAILED
+    assert tts.messages == ["Request failed."]
+
+
+@pytest.mark.asyncio
+async def test_partial_shortcut_stops_remaining_agent_actions(tmp_path: Path) -> None:
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+                InsertTextAction(type="insert_text", text="must not type"),
+            )
+        )
+    )
+    backend = FakeBackend(partial=True)
+    controller, _, _, _, tts = make_controller(
+        tmp_path,
+        backend=backend,
+        planner=planner,
+        models=configured_models(),
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert len(backend.sent) == 2  # failed shortcut batch, then key-up cleanup
+    assert controller.last_outcome is RequestState.FAILED
+    assert tts.messages == ["Request failed."]

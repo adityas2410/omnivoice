@@ -16,8 +16,9 @@ from omnivoice.config import (
     default_credentials_path,
     load_config,
 )
-from omnivoice.interaction import InteractionController
+from omnivoice.interaction import InteractionController, RequestMode
 from omnivoice.models import ModelRegistry
+from omnivoice.planning import ActionPlanGenerator
 from omnivoice.speech.audio import SoundDeviceRecorder, list_input_devices
 from omnivoice.speech.ports import SpeechError
 from omnivoice.speech.setup import (
@@ -34,6 +35,37 @@ from omnivoice.windows.speech import DisabledTTS, WindowsReadyCue, WindowsSapiTT
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _start_hotkeys(hotkeys: Sequence[GlobalHotkey]) -> None:
+    """Start every listener and roll back earlier registrations on failure."""
+
+    started: list[GlobalHotkey] = []
+    try:
+        for hotkey in hotkeys:
+            hotkey.start()
+            started.append(hotkey)
+    except BaseException:
+        for hotkey in reversed(started):
+            try:
+                hotkey.stop()
+            except BaseException:
+                pass
+        raise
+
+
+def _stop_hotkeys(hotkeys: Sequence[GlobalHotkey]) -> None:
+    """Attempt every unregister even if one listener reports a shutdown error."""
+
+    first_error: BaseException | None = None
+    for hotkey in reversed(hotkeys):
+        try:
+            hotkey.stop()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,8 +103,15 @@ async def run(args: argparse.Namespace) -> int:
     """Own and coordinate every long-lived runtime component."""
 
     config, loaded_path = load_config(args.config)
-    spec = parse_hotkey(config.hotkey.push_to_talk)
+    dictation_spec = parse_hotkey(config.hotkey.push_to_talk)
+    agent_spec = parse_hotkey(config.hotkey.agent_push_to_talk)
+    if (
+        dictation_spec.modifier_mask == agent_spec.modifier_mask
+        and dictation_spec.trigger_vk == agent_spec.trigger_vk
+    ):
+        raise HotkeyError("Dictation and agent hotkeys must be different")
     models = ModelRegistry(config.agent)
+    planner = ActionPlanGenerator()
     console = Console()
     loop = asyncio.get_running_loop()
     controller_holder: dict[str, InteractionController] = {}
@@ -127,17 +166,33 @@ async def run(args: argparse.Namespace) -> int:
         stt=stt,
         tts=tts,
         ready_cue=WindowsReadyCue(),
+        planner=planner,
+        models=models,
         minimum_recording_seconds=config.speech.recording.minimum_seconds,
         silence_rms_threshold=config.speech.recording.silence_rms_threshold,
         recording_limit_seconds=config.speech.recording.max_seconds,
     )
     controller_holder["controller"] = controller
 
-    hotkey = GlobalHotkey(
-        spec,
-        lambda: loop.call_soon_threadsafe(controller.hotkey_pressed),
-        lambda: loop.call_soon_threadsafe(controller.hotkey_released),
+    dictation_hotkey = GlobalHotkey(
+        dictation_spec,
+        lambda: loop.call_soon_threadsafe(
+            controller.hotkey_pressed, RequestMode.DICTATION
+        ),
+        lambda: loop.call_soon_threadsafe(
+            controller.hotkey_released, RequestMode.DICTATION
+        ),
     )
+    agent_hotkey = GlobalHotkey(
+        agent_spec,
+        lambda: loop.call_soon_threadsafe(
+            controller.hotkey_pressed, RequestMode.AGENT
+        ),
+        lambda: loop.call_soon_threadsafe(
+            controller.hotkey_released, RequestMode.AGENT
+        ),
+    )
+    hotkeys = (dictation_hotkey, agent_hotkey)
 
     config_description = str(loaded_path) if loaded_path is not None else "built-in defaults"
 
@@ -163,7 +218,8 @@ async def run(args: argparse.Namespace) -> int:
             tts_status = f"tts=windows_sapi not ready ({tts_readiness.detail})"
         return ", ".join(
             (
-                f"hotkey={spec.display_name}",
+                f"dictation_hotkey={dictation_spec.display_name}",
+                f"agent_hotkey={agent_spec.display_name}",
                 f"config={config_description}",
                 stt_status,
                 tts_status,
@@ -179,10 +235,11 @@ async def run(args: argparse.Namespace) -> int:
             await tts.start()
         except SpeechError as exc:
             console.status(f"Status speech unavailable: {exc}")
-        hotkey.start()
+        _start_hotkeys(hotkeys)
         console.status(f"Configuration: {config_description}")
         console.status(f"Provider credentials: {default_credentials_path()}")
-        console.status(f"Push-to-talk hotkey: {spec.display_name}")
+        console.status(f"Dictation hotkey: {dictation_spec.display_name}")
+        console.status(f"Agent hotkey: {agent_spec.display_name}")
         selection = models.snapshot()
         if selection is None:
             console.status("Agent model: not configured.")
@@ -211,7 +268,7 @@ async def run(args: argparse.Namespace) -> int:
             await stt.shutdown()
         await tts.shutdown()
         try:
-            hotkey.stop()
+            _stop_hotkeys(hotkeys)
         finally:
             await focus.stop()
 

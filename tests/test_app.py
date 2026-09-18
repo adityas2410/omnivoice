@@ -3,7 +3,28 @@ from pathlib import Path
 
 import pytest
 
-from omnivoice.app import _run_config_command, build_parser
+from omnivoice.app import (
+    _run_config_command,
+    _start_hotkeys,
+    _stop_hotkeys,
+    build_parser,
+)
+from omnivoice.windows.hotkey import HotkeyError
+
+
+class FakeHotkey:
+    def __init__(self, name: str, events: list[str], *, start_fails: bool = False) -> None:
+        self.name = name
+        self.events = events
+        self.start_fails = start_fails
+
+    def start(self) -> None:
+        self.events.append(f"start:{self.name}")
+        if self.start_fails:
+            raise HotkeyError(f"{self.name} failed")
+
+    def stop(self) -> None:
+        self.events.append(f"stop:{self.name}")
 
 
 def test_config_path_command_is_discoverable() -> None:
@@ -42,3 +63,31 @@ def test_config_paths_command_prints_config_and_credentials(
     output = capsys.readouterr().out
     assert f"Configuration: {tmp_path / 'OmniVoice' / 'config.yaml'}" in output
     assert f"Provider credentials: {tmp_path / 'OmniVoice' / '.env'}" in output
+
+
+def test_both_hotkeys_start_and_stop_in_safe_order() -> None:
+    events: list[str] = []
+    hotkeys = (FakeHotkey("dictation", events), FakeHotkey("agent", events))
+
+    _start_hotkeys(hotkeys)  # type: ignore[arg-type]
+    _stop_hotkeys(hotkeys)  # type: ignore[arg-type]
+
+    assert events == [
+        "start:dictation",
+        "start:agent",
+        "stop:agent",
+        "stop:dictation",
+    ]
+
+
+def test_second_hotkey_start_failure_unregisters_first() -> None:
+    events: list[str] = []
+    hotkeys = (
+        FakeHotkey("dictation", events),
+        FakeHotkey("agent", events, start_fails=True),
+    )
+
+    with pytest.raises(HotkeyError, match="agent failed"):
+        _start_hotkeys(hotkeys)  # type: ignore[arg-type]
+
+    assert events == ["start:dictation", "start:agent", "stop:dictation"]

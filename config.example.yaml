@@ -7,6 +7,7 @@ agent:
 
 hotkey:
   push_to_talk: "ctrl+alt+space"
+  agent_push_to_talk: "ctrl+alt+shift+space"
 
 speech:
   stt:

@@ -1,4 +1,4 @@
-"""Focus-bound dictation and guarded self-test request orchestration."""
+"""Focus-bound dictation, AI action, and self-test request orchestration."""
 
 from __future__ import annotations
 
@@ -8,6 +8,15 @@ import time
 from enum import StrEnum
 from typing import Callable, Protocol
 
+from omnivoice.actions import (
+    ActionPlan,
+    ActionPlanRejected,
+    InsertTextAction,
+    ShortcutAction,
+    validate_action_plan,
+)
+from omnivoice.models import ModelRegistry, ModelSelection
+from omnivoice.planning import PlanGenerationError
 from omnivoice.speech.ports import (
     AudioRecorder,
     ReadyCue,
@@ -41,6 +50,13 @@ class RequestState(StrEnum):
     FAILED = "failed"
 
 
+class RequestMode(StrEnum):
+    """Distinguish literal dictation from one-shot AI interpretation."""
+
+    DICTATION = "dictation"
+    AGENT = "agent"
+
+
 class FocusPort(Protocol):
     """Describe only the focus operations needed by request orchestration."""
 
@@ -53,8 +69,23 @@ class FocusPort(Protocol):
     async def clear_watch(self) -> None: ...
 
 
+class ActionPlanPort(Protocol):
+    """Describe the one-shot model boundary required by orchestration."""
+
+    async def generate(
+        self,
+        transcript: str,
+        selection: ModelSelection,
+        cancelled: asyncio.Event,
+    ) -> ActionPlan: ...
+
+
 class _RequestCancelled(Exception):
     """Carry a user-facing cancellation reason through the async pipeline."""
+
+
+class _RequestRejected(Exception):
+    """Carry a safe policy rejection without treating it as an internal failure."""
 
 
 class InteractionController:
@@ -70,6 +101,8 @@ class InteractionController:
         stt: SpeechToText | None = None,
         tts: TextToSpeech | None = None,
         ready_cue: ReadyCue | None = None,
+        planner: ActionPlanPort | None = None,
+        models: ModelRegistry | None = None,
         minimum_recording_seconds: float = 0.15,
         silence_rms_threshold: int = 80,
         recording_limit_seconds: float = 30.0,
@@ -81,6 +114,8 @@ class InteractionController:
         self._stt = stt
         self._tts = tts
         self._ready_cue = ready_cue
+        self._planner = planner
+        self._models = models
         self._minimum_recording_seconds = minimum_recording_seconds
         self._silence_rms_threshold = silence_rms_threshold
         self._recording_limit_seconds = recording_limit_seconds
@@ -88,6 +123,7 @@ class InteractionController:
         self.last_outcome: RequestState | None = None
         self._armed_until = 0.0
         self._active_lease: FocusLease | None = None
+        self._active_mode: RequestMode | None = None
         self._cancelled = asyncio.Event()
         self._released = asyncio.Event()
         self._request_task: asyncio.Task[None] | None = None
@@ -105,7 +141,7 @@ class InteractionController:
         self._armed_until = time.monotonic() + SELF_TEST_ARM_SECONDS
         self._status(
             "Self-test armed for 30 seconds and one attempt. "
-            "Focus a supported text field, then hold and release the hotkey."
+            "Focus a supported text field, then hold and release the dictation hotkey."
         )
         LOGGER.info("event=self_test_armed expires_in_seconds=30")
 
@@ -114,9 +150,13 @@ class InteractionController:
 
         last = self.last_outcome.value if self.last_outcome is not None else "none"
         armed = "yes" if self.is_armed else "no"
-        return f"state={self.state.value}, self_test_armed={armed}, last_outcome={last}"
+        mode = self._active_mode.value if self._active_mode is not None else "none"
+        return (
+            f"state={self.state.value}, mode={mode}, self_test_armed={armed}, "
+            f"last_outcome={last}"
+        )
 
-    def hotkey_pressed(self) -> None:
+    def hotkey_pressed(self, mode: RequestMode = RequestMode.DICTATION) -> None:
         """Start press-time target binding or reject an overlapping request."""
 
         if self._shutting_down:
@@ -127,16 +167,26 @@ class InteractionController:
             return
         self._cancelled = asyncio.Event()
         self._released = asyncio.Event()
-        armed = self._consume_arm()
+        armed = self._consume_arm() if mode is RequestMode.DICTATION else False
+        selection = (
+            self._models.snapshot()
+            if mode is RequestMode.AGENT and self._models
+            else None
+        )
+        self._active_mode = mode
         self._set_state(RequestState.VALIDATING)
         self._request_task = asyncio.create_task(
-            self._run_request(armed), name="omnivoice-request"
+            self._run_request(mode, armed, selection), name="omnivoice-request"
         )
 
-    def hotkey_released(self) -> None:
+    def hotkey_released(self, mode: RequestMode = RequestMode.DICTATION) -> None:
         """Tell the active request to stop capture or continue the self-test."""
 
-        if not self._shutting_down and self.state is not RequestState.IDLE:
+        if (
+            not self._shutting_down
+            and self.state is not RequestState.IDLE
+            and mode is self._active_mode
+        ):
             self._released.set()
 
     def focus_lost(self, lease: FocusLease) -> None:
@@ -184,13 +234,22 @@ class InteractionController:
         self._armed_until = 0.0
         return armed
 
-    async def _run_request(self, armed: bool) -> None:
-        """Run self-test or literal dictation against one immutable focus lease."""
+    async def _run_request(
+        self,
+        mode: RequestMode,
+        armed: bool,
+        selection: ModelSelection | None,
+    ) -> None:
+        """Run one request mode against one immutable focus lease."""
 
         recording: Recording | None = None
         recorder_active = False
         try:
             await self._stop_pending_speech()
+            if mode is RequestMode.AGENT and selection is None:
+                raise _RequestRejected(
+                    "No agent model is configured. Add a model profile to config.yaml."
+                )
             self._status("Validating and binding the focused control...")
             lease = await self._focus.capture()
             self._active_lease = lease
@@ -233,7 +292,11 @@ class InteractionController:
                 self._silence_rms_threshold,
             ):
                 self._status("No speech detected.")
-                await self._speak("No speech detected.")
+                await self._speak(
+                    "Request rejected."
+                    if mode is RequestMode.AGENT
+                    else "No speech detected."
+                )
                 self._finish(RequestState.CANCELLED)
                 return
 
@@ -243,8 +306,29 @@ class InteractionController:
             transcript = await self._stt.transcribe(recording, self._cancelled)
             if self._cancelled.is_set():
                 raise _RequestCancelled("Request cancelled.")
-            await self._execute_text(lease, transcript)
-            self._status("Dictation completed.")
+            if mode is RequestMode.DICTATION:
+                await self._execute_text(lease, transcript)
+                completion = "Dictation completed."
+            else:
+                if self._planner is None or selection is None:
+                    raise PlanGenerationError("AI action planning is unavailable.")
+                self._set_state(RequestState.PROCESSING)
+                self._status(
+                    f"Generating an action plan with {selection.alias} "
+                    f"({selection.selector})..."
+                )
+                plan = validate_action_plan(
+                    await self._planner.generate(
+                        transcript, selection, self._cancelled
+                    )
+                )
+                if not plan.actions:
+                    raise _RequestRejected(
+                        "The request cannot be completed with the permitted actions."
+                    )
+                await self._execute_plan(lease, plan)
+                completion = "AI action plan completed."
+            self._status(completion)
             self._finish(RequestState.COMPLETED)
             await self._speak("Done.")
         except InvalidTargetError as exc:
@@ -254,13 +338,22 @@ class InteractionController:
             self._status(message)
             LOGGER.info("event=target_rejected reason=%s", type(exc).__name__)
             self._finish(RequestState.CANCELLED)
-            await self._speak("That field isn't supported.")
+            await self._speak(
+                "Request rejected."
+                if mode is RequestMode.AGENT
+                else "That field isn't supported."
+            )
         except _RequestCancelled as exc:
             if str(exc) and not self._cancelled.is_set():
                 self._status(str(exc))
             self._cancelled.set()
             self._finish(RequestState.CANCELLED)
             await self._speak("Cancelled.")
+        except (ActionPlanRejected, _RequestRejected) as exc:
+            self._status(str(exc) or "The request was rejected.")
+            LOGGER.info("event=request_rejected reason=%s", type(exc).__name__)
+            self._finish(RequestState.CANCELLED)
+            await self._speak("Request rejected.")
         except asyncio.CancelledError:
             self._cancelled.set()
             if self.state is not RequestState.IDLE:
@@ -271,12 +364,23 @@ class InteractionController:
             self._status(f"Transcription failed: {exc}")
             LOGGER.info("event=transcription_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
-            await self._speak("Transcription failed.")
+            await self._speak(
+                "Request failed."
+                if mode is RequestMode.AGENT
+                else "Transcription failed."
+            )
         except RecorderError as exc:
             self._status(f"Recording failed safely: {exc}")
             LOGGER.info("event=recording_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
-            await self._speak("Cancelled.")
+            await self._speak(
+                "Request failed." if mode is RequestMode.AGENT else "Cancelled."
+            )
+        except PlanGenerationError as exc:
+            self._status(exc.user_message)
+            LOGGER.info("event=plan_generation_failed error_type=%s", type(exc).__name__)
+            self._finish(RequestState.FAILED)
+            await self._speak("Request failed.")
         except (FocusError, InputError) as exc:
             message = f"Request failed safely: {exc}"
             if armed:
@@ -284,20 +388,25 @@ class InteractionController:
             self._status(message)
             LOGGER.info("event=request_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
-            await self._speak("Cancelled.")
+            await self._speak(
+                "Request failed." if mode is RequestMode.AGENT else "Cancelled."
+            )
         except BaseException as exc:
             self._status("Request failed safely because of an unexpected internal error.")
             # Arbitrary provider exception messages can contain content, so the
             # request log records only their class rather than a traceback.
             LOGGER.error("event=request_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
-            await self._speak("Cancelled.")
+            await self._speak(
+                "Request failed." if mode is RequestMode.AGENT else "Cancelled."
+            )
         finally:
             if recorder_active and self._recorder is not None:
                 await self._safe_cancel_recorder()
             if recording is not None:
                 self._safe_cleanup_recording(recording)
             self._active_lease = None
+            self._active_mode = None
             await self._safe_clear_watch()
             self._request_task = None
             self._set_state(RequestState.IDLE)
@@ -392,6 +501,29 @@ class InteractionController:
             lambda: self._focus.matches(lease),
             self._cancelled,
         )
+
+    async def _execute_plan(self, lease: FocusLease, plan: ActionPlan) -> None:
+        """Execute a fully prevalidated plan while preserving its focus lease."""
+
+        if not await self._keyboard.wait_for_modifiers_released(timeout=1.0):
+            raise _RequestCancelled("A modifier key remained held. Request cancelled.")
+        self._set_state(RequestState.EXECUTING)
+        self._status("Executing the validated action plan...")
+        for action in plan.actions:
+            if self._cancelled.is_set() or not await self._focus.matches(lease):
+                raise _RequestCancelled("Focus changed. Request cancelled.")
+            if isinstance(action, InsertTextAction):
+                await self._keyboard.type_text(
+                    action.text,
+                    lambda: self._focus.matches(lease),
+                    self._cancelled,
+                )
+            elif isinstance(action, ShortcutAction):
+                await self._keyboard.press_shortcut(
+                    action.keys,
+                    lambda: self._focus.matches(lease),
+                    self._cancelled,
+                )
 
     async def _wait_or_cancel(self, seconds: float) -> bool:
         try:
