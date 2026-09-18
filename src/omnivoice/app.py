@@ -12,6 +12,7 @@ from typing import Sequence
 from omnivoice.cli import Console
 from omnivoice.config import ConfigError, load_config
 from omnivoice.interaction import InteractionController
+from omnivoice.models import ModelRegistry
 from omnivoice.speech.audio import SoundDeviceRecorder, list_input_devices
 from omnivoice.speech.ports import SpeechError
 from omnivoice.speech.setup import (
@@ -60,6 +61,7 @@ async def run(args: argparse.Namespace) -> int:
 
     config, loaded_path = load_config(args.config)
     spec = parse_hotkey(config.hotkey.push_to_talk)
+    models = ModelRegistry(config.agent)
     console = Console()
     loop = asyncio.get_running_loop()
     controller_holder: dict[str, InteractionController] = {}
@@ -169,6 +171,13 @@ async def run(args: argparse.Namespace) -> int:
         hotkey.start()
         console.status(f"Configuration: {config_description}")
         console.status(f"Push-to-talk hotkey: {spec.display_name}")
+        selection = models.snapshot()
+        if selection is None:
+            console.status("Agent model: not configured.")
+        else:
+            console.status(
+                f"Agent model: {selection.alias} ({selection.selector}) [default]."
+            )
         if stt is not None and not stt.readiness.ready:
             console.status(
                 "Local transcription is not ready. Run 'omnivoice speech setup'; "
@@ -177,6 +186,7 @@ async def run(args: argparse.Namespace) -> int:
         await console.run(
             controller,
             runtime_status,
+            models,
         )
         return 0
     finally:
