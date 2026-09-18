@@ -34,6 +34,16 @@ def downloader_for(archive: bytes, model: bytes, calls: list[str]):
     return download
 
 
+def test_pinned_model_uses_the_published_file_digest() -> None:
+    # Hugging Face exposes this as X-Linked-ETag. X-Xet-Hash is a storage
+    # reconstruction identifier and is not the SHA-256 of downloaded bytes.
+    assert setup.WHISPER_MODEL_SHA256 == (
+        "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
+    )
+    assert setup.WHISPER_MODEL_REVISION in setup.WHISPER_MODEL_URL
+    assert "/resolve/main/" not in setup.WHISPER_MODEL_URL
+
+
 def test_verified_setup_installs_and_reuses_assets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

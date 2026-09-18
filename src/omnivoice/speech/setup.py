@@ -24,12 +24,14 @@ WHISPER_ARCHIVE_SHA256 = (
     "55c06d09e8b9b6cfb2b0b47ddedc71803054f0e48be1f41848b3141c06c703a9"
 )
 WHISPER_MODEL_NAME = "ggml-small.en.bin"
+WHISPER_MODEL_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
 WHISPER_MODEL_URL = (
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+    f"{WHISPER_MODEL_REVISION}/"
     f"{WHISPER_MODEL_NAME}"
 )
 WHISPER_MODEL_SHA256 = (
-    "0d57184d34ae7d736e5bb2db5bf83debe730bd53dcefa235a0979b9dcfd33fb3"
+    "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
 )
 MANIFEST_NAME = "omnivoice-manifest.json"
 
@@ -249,4 +251,3 @@ def _replace_directory(source: Path, destination: Path) -> None:
         raise
     if backup.exists():
         shutil.rmtree(backup)
-
