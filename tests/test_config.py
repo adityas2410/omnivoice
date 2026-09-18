@@ -1,9 +1,15 @@
+import os
 from pathlib import Path
 
 import pytest
 import yaml
 
-from omnivoice.config import ConfigError, OmniVoiceConfig, config_for_logging, load_config
+from omnivoice.config import (
+    ConfigError,
+    OmniVoiceConfig,
+    config_for_logging,
+    load_config,
+)
 
 
 def test_missing_default_config_is_created_with_models(
@@ -17,6 +23,11 @@ def test_missing_default_config_is_created_with_models(
     expected_path = app_data / "OmniVoice" / "config.yaml"
     assert loaded == expected_path
     assert expected_path.exists()
+    credentials_path = app_data / "OmniVoice" / ".env"
+    assert credentials_path.exists()
+    credentials = credentials_path.read_text(encoding="utf-8")
+    assert "GROQ_API_KEY=" in credentials
+    assert "OLLAMA_API_KEY=" in credentials
     assert config.agent.default_model == "groq-fast"
     assert config.agent.models == {
         "groq-fast": "groq:openai/gpt-oss-20b",
@@ -24,6 +35,7 @@ def test_missing_default_config_is_created_with_models(
         "ollama-local": "ollama:qwen3:8b",
     }
     written = yaml.safe_load(expected_path.read_text(encoding="utf-8"))
+    assert "API keys belong in" in expected_path.read_text(encoding="utf-8")
     assert written["agent"]["default_model"] == "groq-fast"
     assert written["agent"]["models"] == config.agent.models
     assert config.hotkey.push_to_talk == "ctrl+alt+space"
@@ -47,6 +59,29 @@ def test_existing_user_config_is_loaded(
 
     assert loaded == user_config
     assert config.hotkey.push_to_talk == "f9"
+
+
+def test_user_credentials_file_is_loaded_without_overriding_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app_data = tmp_path / "appdata"
+    working_directory = tmp_path / "working"
+    user_directory = app_data / "OmniVoice"
+    working_directory.mkdir()
+    user_directory.mkdir(parents=True)
+    (user_directory / ".env").write_text(
+        "GROQ_API_KEY=file-test-key\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(working_directory)
+    monkeypatch.setenv("APPDATA", str(app_data))
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+
+    load_config()
+
+    assert os.environ["GROQ_API_KEY"] == "file-test-key"
+    monkeypatch.setenv("GROQ_API_KEY", "process-test-key")
+    load_config()
+    assert os.environ["GROQ_API_KEY"] == "process-test-key"
 
 
 def test_explicit_config_is_loaded(tmp_path: Path) -> None:

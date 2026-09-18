@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Sequence
 
 from omnivoice.cli import Console
-from omnivoice.config import ConfigError, default_config_path, load_config
+from omnivoice.config import (
+    ConfigError,
+    default_config_path,
+    default_credentials_path,
+    load_config,
+)
 from omnivoice.interaction import InteractionController
 from omnivoice.models import ModelRegistry
 from omnivoice.speech.audio import SoundDeviceRecorder, list_input_devices
@@ -56,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     config = commands.add_parser("config", help="Inspect configuration locations")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     config_commands.add_parser("path", help="Print the user configuration path")
+    config_commands.add_parser(
+        "paths", help="Print configuration and provider-credentials paths"
+    )
     return parser
 
 
@@ -173,6 +181,7 @@ async def run(args: argparse.Namespace) -> int:
             console.status(f"Status speech unavailable: {exc}")
         hotkey.start()
         console.status(f"Configuration: {config_description}")
+        console.status(f"Provider credentials: {default_credentials_path()}")
         console.status(f"Push-to-talk hotkey: {spec.display_name}")
         selection = models.snapshot()
         if selection is None:
@@ -230,6 +239,10 @@ def _run_config_command(args: argparse.Namespace) -> int:
 
     if args.config_command == "path":
         print(default_config_path())
+        return 0
+    if args.config_command == "paths":
+        print(f"Configuration: {default_config_path()}")
+        print(f"Provider credentials: {default_credentials_path()}")
         return 0
     raise ConfigError("Unknown config command")
 

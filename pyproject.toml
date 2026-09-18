@@ -13,6 +13,7 @@ dependencies = [
     "comtypes>=1.4.8",
     "prompt-toolkit>=3.0.52",
     "pydantic>=2.10",
+    "python-dotenv>=1.0.1",
     "PyYAML>=6.0.2",
     "sounddevice>=0.5.6",
 ]

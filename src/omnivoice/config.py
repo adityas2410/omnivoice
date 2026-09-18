@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -20,6 +21,23 @@ from pydantic import (
 
 class ConfigError(RuntimeError):
     """Raised when an OmniVoice configuration file cannot be loaded."""
+
+
+CONFIG_HEADER = """# OmniVoice configuration.
+# Add model profiles under agent.models as: alias: "provider:model-name"
+# Set agent.default_model to one of those aliases.
+# API keys belong in %APPDATA%\\OmniVoice\\.env, never in this YAML file.
+
+"""
+
+CREDENTIALS_TEMPLATE = """# OmniVoice provider credentials. Keep this file private.
+# Groq-hosted models use this key:
+GROQ_API_KEY=
+
+# Local Ollama at http://localhost:11434 needs no API key.
+# Reserved for optional Ollama Cloud support:
+OLLAMA_API_KEY=
+"""
 
 
 class AgentConfig(BaseModel):
@@ -170,18 +188,47 @@ def default_config_path() -> Path:
     return Path.home() / "AppData" / "Roaming" / "OmniVoice" / "config.yaml"
 
 
+def default_credentials_path() -> Path:
+    """Return the per-user provider-credentials file location."""
+
+    return default_config_path().with_name(".env")
+
+
+def _load_environment_files() -> None:
+    """Create the user credentials template and load local/user env files safely."""
+
+    credentials_path = default_credentials_path()
+    try:
+        credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        if not credentials_path.exists():
+            with credentials_path.open(
+                "x", encoding="utf-8", newline="\n"
+            ) as credentials_file:
+                credentials_file.write(CREDENTIALS_TEMPLATE)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise ConfigError(
+            f"Could not create provider credentials file {credentials_path}: {exc}"
+        ) from exc
+
+    working_credentials = Path.cwd() / ".env"
+    if working_credentials != credentials_path:
+        load_dotenv(working_credentials, override=False)
+    load_dotenv(credentials_path, override=False)
+
+
 def load_config(explicit_path: Path | None = None) -> tuple[OmniVoiceConfig, Path | None]:
     """Load a config or create a discoverable per-user config on first launch."""
 
+    _load_environment_files()
     path = explicit_path if explicit_path is not None else default_config_path()
     if not path.exists():
         if explicit_path is not None:
             raise ConfigError(f"Configuration file does not exist: {path}")
         config = OmniVoiceConfig()
-        serialized = yaml.safe_dump(
-            config.model_dump(mode="json"),
-            sort_keys=False,
-            allow_unicode=True,
+        serialized = CONFIG_HEADER + yaml.safe_dump(
+            config.model_dump(mode="json"), sort_keys=False, allow_unicode=True
         )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
