@@ -6,6 +6,7 @@ from omnivoice.actions import (
     ActionPlan,
     ActionPlanRejected,
     InsertTextAction,
+    ReplaceSelectionAction,
     ShortcutAction,
     format_action_plan,
     planner_instructions,
@@ -52,6 +53,8 @@ def test_model_output_format_is_single_line_json_with_escaped_controls() -> None
         {"actions": [{"type": "unknown"}]},
         {"actions": [{"type": "insert_text"}]},
         {"actions": [{"type": "insert_text", "text": 123}]},
+        {"actions": [{"type": "replace_selection", "text": ""}]},
+        {"actions": [{"type": "replace_selection"}]},
         {"actions": [{"type": "shortcut", "keys": ["ctrl", "s"], "delay": 1}]},
         {"actions": [{"type": "shortcut", "keys": [1, 2]}]},
         {"actions": [], "extra": True},
@@ -143,3 +146,75 @@ def test_prompt_derives_allowed_chords_without_intent_mappings() -> None:
     assert "ctrl+z" in instructions
     assert "save" not in instructions.lower()
     assert "undo" not in instructions.lower()
+
+
+def test_selection_replacement_allows_line_breaks() -> None:
+    plan = ActionPlan(
+        actions=(
+            ReplaceSelectionAction(
+                type="replace_selection", text="First line.\r\nSecond line."
+            ),
+            ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+        )
+    )
+
+    assert validate_action_plan(plan, has_selection=True) is plan
+
+
+def test_selection_replacement_requires_selection() -> None:
+    plan = ActionPlan(
+        actions=(
+            ReplaceSelectionAction(type="replace_selection", text="replacement"),
+        )
+    )
+
+    with pytest.raises(ActionPlanRejected, match="none is available"):
+        validate_action_plan(plan)
+
+
+def test_active_selection_blocks_implicit_overwrite() -> None:
+    for action in (
+        InsertTextAction(type="insert_text", text="implicit"),
+        ShortcutAction(type="shortcut", keys=("enter",)),
+    ):
+        with pytest.raises(ActionPlanRejected, match="explicit replacement"):
+            validate_action_plan(ActionPlan(actions=(action,)), has_selection=True)
+
+
+def test_active_selection_still_allows_non_text_shortcuts() -> None:
+    for keys in (("ctrl", "s"), ("ctrl", "z")):
+        plan = ActionPlan(actions=(ShortcutAction(type="shortcut", keys=keys),))
+        assert validate_action_plan(plan, has_selection=True) is plan
+
+
+def test_selection_replacement_must_be_unique_first_and_terminal_for_text() -> None:
+    replacement = ReplaceSelectionAction(type="replace_selection", text="replacement")
+    invalid_plans = (
+        ActionPlan(
+            actions=(
+                ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+                replacement,
+            )
+        ),
+        ActionPlan(actions=(replacement, replacement)),
+        ActionPlan(
+            actions=(replacement, InsertTextAction(type="insert_text", text="more"))
+        ),
+        ActionPlan(
+            actions=(replacement, ShortcutAction(type="shortcut", keys=("enter",)))
+        ),
+    )
+
+    for plan in invalid_plans:
+        with pytest.raises(ActionPlanRejected):
+            validate_action_plan(plan, has_selection=True)
+
+
+@pytest.mark.parametrize("text", ["bad\ttext", "nul\x00text", "escape\x1b"])
+def test_selection_replacement_blocks_non_line_control_characters(text: str) -> None:
+    plan = ActionPlan(
+        actions=(ReplaceSelectionAction(type="replace_selection", text=text),)
+    )
+
+    with pytest.raises(ActionPlanRejected, match="unsupported control"):
+        validate_action_plan(plan, has_selection=True)

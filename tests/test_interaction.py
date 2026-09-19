@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 import omnivoice.interaction as interaction
-from omnivoice.actions import ActionPlan, InsertTextAction, ShortcutAction
+from omnivoice.actions import (
+    ActionPlan,
+    InsertTextAction,
+    ReplaceSelectionAction,
+    ShortcutAction,
+)
 from omnivoice.config import AgentConfig
 from omnivoice.interaction import (
     SELF_TEST_TEXT,
@@ -17,7 +22,7 @@ from omnivoice.interaction import (
 from omnivoice.models import ModelRegistry, ModelSelection
 from omnivoice.planning import PlanGenerationError
 from omnivoice.speech.ports import Readiness, Recording, SpeechToTextError
-from omnivoice.windows.focus import FocusLease
+from omnivoice.windows.focus import FocusLease, SelectionContext
 from omnivoice.windows.keyboard import INPUT, KeyboardExecutor
 
 
@@ -28,6 +33,10 @@ class FakeFocus:
     def __init__(self) -> None:
         self.current = LEASE
         self.watched: FocusLease | None = None
+        self.selection: SelectionContext | None = None
+        self.selection_valid = True
+        self.selection_checks = 0
+        self.clears = 0
 
     async def capture(self) -> FocusLease:
         return self.current
@@ -41,8 +50,21 @@ class FakeFocus:
         self.watched = lease
         return True
 
+    async def capture_selection(self, lease: FocusLease) -> SelectionContext | None:
+        assert lease == self.current
+        return self.selection
+
+    async def selection_matches(self, selection: SelectionContext) -> bool:
+        self.selection_checks += 1
+        return (
+            self.selection_valid
+            and self.current == selection.lease
+            and self.selection == selection
+        )
+
     async def clear_watch(self) -> None:
         self.watched = None
+        self.clears += 1
 
 
 class FakeBackend:
@@ -152,9 +174,10 @@ class FakeCue:
 class FakePlanner:
     def __init__(self, plan: ActionPlan | None = None) -> None:
         self.plan = plan if plan is not None else ActionPlan(actions=())
-        self.calls: list[tuple[str, ModelSelection]] = []
+        self.calls: list[tuple[str, ModelSelection, str | None]] = []
         self.started = asyncio.Event()
         self.wait_for_cancellation = False
+        self.gate: asyncio.Event | None = None
         self.error: Exception | None = None
 
     async def generate(
@@ -162,12 +185,15 @@ class FakePlanner:
         transcript: str,
         selection: ModelSelection,
         cancelled: asyncio.Event,
+        selected_text: str | None = None,
     ) -> ActionPlan:
-        self.calls.append((transcript, selection))
+        self.calls.append((transcript, selection, selected_text))
         self.started.set()
         if self.wait_for_cancellation:
             await cancelled.wait()
             raise asyncio.CancelledError
+        if self.gate is not None:
+            await self.gate.wait()
         if self.error is not None:
             raise self.error
         return self.plan
@@ -422,6 +448,7 @@ async def test_agent_request_executes_validated_text_and_shortcut(
         (
             stt.transcript,
             ModelSelection("groq-fast", "groq:openai/gpt-oss-20b"),
+            None,
         )
     ]
     assert len(backend.sent) == len("First sentence.Second sentence.") + 1
@@ -432,6 +459,173 @@ async def test_agent_request_executes_validated_text_and_shortcut(
     )
     assert stt.transcript not in caplog.text
     assert "hello" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_agent_replaces_stable_selection_with_multiline_text_and_saves(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection", LEASE, "private original text")
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                ReplaceSelectionAction(
+                    type="replace_selection", text="First line.\nSecond line."
+                ),
+                ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+            )
+        )
+    )
+    controller, backend, _, stt, tts = make_controller(
+        tmp_path,
+        focus=focus,
+        planner=planner,
+        models=configured_models(),
+    )
+
+    with caplog.at_level(logging.INFO):
+        controller.hotkey_pressed(RequestMode.AGENT)
+        await wait_for_state(controller, RequestState.LISTENING)
+        controller.hotkey_released(RequestMode.AGENT)
+        await wait_until_idle(controller)
+
+    assert planner.calls == [
+        (
+            stt.transcript,
+            ModelSelection("groq-fast", "groq:openai/gpt-oss-20b"),
+            "private original text",
+        )
+    ]
+    assert len(backend.sent) == len("First line.Second line.") + 2
+    assert focus.selection_checks == 2
+    assert focus.clears == 1
+    assert controller.last_outcome is RequestState.COMPLETED
+    assert tts.messages == ["Done."]
+    assert "private original text" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_selection_change_after_transcription_prevents_model_and_input(
+    tmp_path: Path,
+) -> None:
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection", LEASE, "original")
+
+    class InvalidatingSTT(FakeSTT):
+        async def transcribe(
+            self, recording: Recording, cancelled: asyncio.Event
+        ) -> str:
+            result = await super().transcribe(recording, cancelled)
+            focus.selection_valid = False
+            return result
+
+    planner = FakePlanner()
+    controller, backend, _, _, tts = make_controller(
+        tmp_path,
+        focus=focus,
+        stt=InvalidatingSTT(),
+        planner=planner,
+        models=configured_models(),
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert planner.calls == []
+    assert backend.sent == []
+    assert controller.last_outcome is RequestState.CANCELLED
+    assert tts.messages == ["Cancelled."]
+
+
+@pytest.mark.asyncio
+async def test_selection_change_during_planning_prevents_replacement(
+    tmp_path: Path,
+) -> None:
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection", LEASE, "original")
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                ReplaceSelectionAction(type="replace_selection", text="replacement"),
+            )
+        )
+    )
+    planner.gate = asyncio.Event()
+    controller, backend, _, _, tts = make_controller(
+        tmp_path, focus=focus, planner=planner, models=configured_models()
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await planner.started.wait()
+    focus.selection_valid = False
+    planner.gate.set()
+    await wait_until_idle(controller)
+
+    assert backend.sent == []
+    assert controller.last_outcome is RequestState.CANCELLED
+    assert tts.messages == ["Cancelled."]
+
+
+@pytest.mark.asyncio
+async def test_active_selection_cannot_be_overwritten_by_insert_action(
+    tmp_path: Path,
+) -> None:
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection", LEASE, "original")
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(InsertTextAction(type="insert_text", text="implicit overwrite"),)
+        )
+    )
+    controller, backend, _, _, tts = make_controller(
+        tmp_path, focus=focus, planner=planner, models=configured_models()
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert backend.sent == []
+    assert controller.last_outcome is RequestState.CANCELLED
+    assert tts.messages == ["Request not completed."]
+
+
+@pytest.mark.asyncio
+async def test_partial_selection_replacement_stops_without_rollback(
+    tmp_path: Path,
+) -> None:
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection", LEASE, "original")
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                ReplaceSelectionAction(type="replace_selection", text="replacement"),
+            )
+        )
+    )
+    backend = FakeBackend(partial=True)
+    controller, _, _, _, tts = make_controller(
+        tmp_path,
+        backend=backend,
+        focus=focus,
+        planner=planner,
+        models=configured_models(),
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert len(backend.sent) == 2
+    assert controller.last_outcome is RequestState.FAILED
+    assert tts.messages == ["Request failed."]
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -114,6 +115,7 @@ class ActionPlanGenerator:
         transcript: str,
         selection: ModelSelection,
         cancelled: asyncio.Event,
+        selected_text: str | None = None,
     ) -> ActionPlan:
         """Run one bounded request and discard any result arriving after cancellation."""
 
@@ -124,8 +126,12 @@ class ActionPlanGenerator:
         cancel_task: asyncio.Task[bool] | None = None
         try:
             handle = self._model_factory(selection)
+            request = json.dumps(
+                {"request": transcript, "selected_text": selected_text},
+                ensure_ascii=False,
+            )
             run_task = asyncio.create_task(
-                self._run(transcript, handle.model), name="omnivoice-model-request"
+                self._run(request, handle.model), name="omnivoice-model-request"
             )
             cancel_task = asyncio.create_task(cancelled.wait())
             async with asyncio.timeout(PLAN_DEADLINE_SECONDS):
@@ -140,7 +146,7 @@ class ActionPlanGenerator:
             if cancelled.is_set():
                 raise asyncio.CancelledError
             try:
-                return validate_action_plan(plan)
+                return validate_action_plan(plan, has_selection=selected_text is not None)
             except ActionPlanRejected as exc:
                 raise ActionPlanRejected(
                     f"{exc} Model output: {format_action_plan(plan)}"

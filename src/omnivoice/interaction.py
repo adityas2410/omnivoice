@@ -12,6 +12,7 @@ from omnivoice.actions import (
     ActionPlan,
     ActionPlanRejected,
     InsertTextAction,
+    ReplaceSelectionAction,
     ShortcutAction,
     format_action_plan,
     validate_action_plan,
@@ -27,7 +28,12 @@ from omnivoice.speech.ports import (
     SpeechToTextError,
     TextToSpeech,
 )
-from omnivoice.windows.focus import FocusError, FocusLease, InvalidTargetError
+from omnivoice.windows.focus import (
+    FocusError,
+    FocusLease,
+    InvalidTargetError,
+    SelectionContext,
+)
 from omnivoice.windows.keyboard import InputError, KeyboardExecutor
 
 
@@ -67,6 +73,10 @@ class FocusPort(Protocol):
 
     async def watch(self, lease: FocusLease) -> bool: ...
 
+    async def capture_selection(self, lease: FocusLease) -> SelectionContext | None: ...
+
+    async def selection_matches(self, selection: SelectionContext) -> bool: ...
+
     async def clear_watch(self) -> None: ...
 
 
@@ -78,6 +88,7 @@ class ActionPlanPort(Protocol):
         transcript: str,
         selection: ModelSelection,
         cancelled: asyncio.Event,
+        selected_text: str | None = None,
     ) -> ActionPlan: ...
 
 
@@ -245,6 +256,7 @@ class InteractionController:
 
         recording: Recording | None = None
         recorder_active = False
+        selection_context: SelectionContext | None = None
         try:
             await self._stop_pending_speech()
             if mode is RequestMode.AGENT and selection is None:
@@ -266,6 +278,8 @@ class InteractionController:
                 raise _RequestCancelled("Hotkey released before the target was ready.")
             if not await self._focus.watch(lease):
                 raise _RequestCancelled("Focus changed. Request cancelled.")
+            if mode is RequestMode.AGENT:
+                selection_context = await self._focus.capture_selection(lease)
 
             if armed:
                 await self._run_self_test(lease)
@@ -313,6 +327,10 @@ class InteractionController:
             else:
                 if self._planner is None or selection is None:
                     raise PlanGenerationError("AI action planning is unavailable.")
+                if selection_context is not None and not await self._focus.selection_matches(
+                    selection_context
+                ):
+                    raise _RequestCancelled("Selected text changed. Request cancelled.")
                 self._set_state(RequestState.PROCESSING)
                 self._status(
                     f"Generating an action plan with {selection.alias} "
@@ -320,15 +338,23 @@ class InteractionController:
                 )
                 plan = validate_action_plan(
                     await self._planner.generate(
-                        transcript, selection, self._cancelled
-                    )
+                        transcript,
+                        selection,
+                        self._cancelled,
+                        selected_text=(
+                            selection_context.text
+                            if selection_context is not None
+                            else None
+                        ),
+                    ),
+                    has_selection=selection_context is not None,
                 )
                 self._status(f"Model output: {format_action_plan(plan)}")
                 if not plan.actions:
                     raise _RequestRejected(
                         "The request cannot be completed with the permitted actions."
                     )
-                await self._execute_plan(lease, plan)
+                await self._execute_plan(lease, plan, selection_context)
                 completion = "AI action plan completed."
             self._status(completion)
             self._finish(RequestState.COMPLETED)
@@ -504,7 +530,12 @@ class InteractionController:
             self._cancelled,
         )
 
-    async def _execute_plan(self, lease: FocusLease, plan: ActionPlan) -> None:
+    async def _execute_plan(
+        self,
+        lease: FocusLease,
+        plan: ActionPlan,
+        selection: SelectionContext | None = None,
+    ) -> None:
         """Execute a fully prevalidated plan while preserving its focus lease."""
 
         if not await self._keyboard.wait_for_modifiers_released(timeout=1.0):
@@ -520,9 +551,32 @@ class InteractionController:
                     lambda: self._focus.matches(lease),
                     self._cancelled,
                 )
+            elif isinstance(action, ReplaceSelectionAction):
+                if selection is None or not await self._focus.selection_matches(selection):
+                    raise _RequestCancelled("Selected text changed. Request cancelled.")
+                await self._replace_selection(lease, action.text)
             elif isinstance(action, ShortcutAction):
                 await self._keyboard.press_shortcut(
                     action.keys,
+                    lambda: self._focus.matches(lease),
+                    self._cancelled,
+                )
+
+    async def _replace_selection(self, lease: FocusLease, text: str) -> None:
+        """Replace the active range, translating only CR/LF into guarded Enter presses."""
+
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        parts = normalized.split("\n")
+        for index, part in enumerate(parts):
+            if part:
+                await self._keyboard.type_text(
+                    part,
+                    lambda: self._focus.matches(lease),
+                    self._cancelled,
+                )
+            if index < len(parts) - 1:
+                await self._keyboard.press_shortcut(
+                    ("enter",),
                     lambda: self._focus.matches(lease),
                     self._cancelled,
                 )
