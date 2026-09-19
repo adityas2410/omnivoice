@@ -1,9 +1,12 @@
 import asyncio
+import json
 from collections.abc import Callable
 
 import pytest
+import pydantic_ai
+from pydantic_ai import ModelProfile
 from pydantic_ai import models as pydantic_models
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.ollama import OllamaModel
@@ -36,10 +39,19 @@ def model_factory(
     return lambda selection: ModelHandle(model=model, close=close)
 
 
+def native_test_model(output: object) -> TestModel:
+    """Make TestModel emulate a provider-native JSON-schema response."""
+
+    return TestModel(
+        custom_output_text=json.dumps(output),
+        profile=ModelProfile(supports_json_schema_output=True),
+    )
+
+
 @pytest.mark.asyncio
 async def test_test_model_returns_typed_plan_without_network() -> None:
-    model = TestModel(
-        custom_output_args={
+    model = native_test_model(
+        {
             "actions": [
                 {"type": "insert_text", "text": "hello"},
                 {"type": "shortcut", "keys": ["ctrl", "s"]},
@@ -57,6 +69,9 @@ async def test_test_model_returns_typed_plan_without_network() -> None:
 
     assert [action.type for action in plan.actions] == ["insert_text", "shortcut"]
     assert closed == [True]
+    assert pydantic_ai.BANNER_ENABLED is False
+    assert model.last_model_request_parameters is not None
+    assert model.last_model_request_parameters.output_mode == "native"
 
 
 @pytest.mark.asyncio
@@ -67,13 +82,12 @@ async def test_function_model_corrects_one_invalid_output() -> None:
         nonlocal calls
         del messages
         calls += 1
-        output_name = info.output_tools[0].name
         arguments = (
             {"actions": [{"type": "shortcut", "keys": []}]}
             if calls == 1
             else {"actions": [{"type": "shortcut", "keys": ["ctrl", "z"]}]}
         )
-        return ModelResponse(parts=[ToolCallPart(output_name, arguments)])
+        return ModelResponse(parts=[TextPart(json.dumps(arguments))])
 
     generator = ActionPlanGenerator(model_factory(FunctionModel(respond)))
 
@@ -90,7 +104,7 @@ async def test_function_model_corrects_one_invalid_output() -> None:
 @pytest.mark.asyncio
 async def test_repeated_malformed_output_is_sanitized() -> None:
     generator = ActionPlanGenerator(
-        model_factory(TestModel(custom_output_args={"actions": "private malformed"}))
+        model_factory(native_test_model({"actions": "private malformed"}))
     )
 
     with pytest.raises(PlanGenerationError, match="valid action plan") as error:
@@ -107,8 +121,8 @@ async def test_repeated_malformed_output_is_sanitized() -> None:
 async def test_policy_rejection_is_not_misreported_as_provider_failure() -> None:
     generator = ActionPlanGenerator(
         model_factory(
-            TestModel(
-                custom_output_args={
+            native_test_model(
+                {
                     "actions": [{"type": "shortcut", "keys": ["alt", "f4"]}]
                 }
             )
@@ -131,11 +145,7 @@ async def test_cancellation_discards_late_model_output() -> None:
         del messages
         started.set()
         await asyncio.Event().wait()
-        return ModelResponse(
-            parts=[
-                ToolCallPart(info.output_tools[0].name, {"actions": []})
-            ]
-        )
+        return ModelResponse(parts=[TextPart('{"actions": []}')])
 
     cancelled = asyncio.Event()
     generator = ActionPlanGenerator(model_factory(FunctionModel(respond)))

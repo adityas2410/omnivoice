@@ -10,11 +10,12 @@ from typing import Any
 
 from groq import AsyncGroq
 from openai import AsyncOpenAI
+import pydantic_ai
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.ollama import OllamaModel
-from pydantic_ai.output import ToolOutput
+from pydantic_ai.output import NativeOutput
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.settings import ModelSettings
@@ -33,6 +34,11 @@ MODEL_REQUEST_TIMEOUT_SECONDS = 20.0
 PLAN_DEADLINE_SECONDS = 30.0
 MAX_OUTPUT_TOKENS = 1_024
 OLLAMA_LOCAL_BASE_URL = "http://localhost:11434/v1"
+
+# OmniVoice owns its interactive terminal.  Pydantic AI otherwise prints a
+# first-run promotional banner (including ANSI escapes on some Windows
+# terminals) when the first model request starts.
+pydantic_ai.BANNER_ENABLED = False
 
 
 class PlanGenerationError(RuntimeError):
@@ -94,12 +100,12 @@ class ActionPlanGenerator:
         self._model_factory = model_factory
         self._agent = Agent(
             instructions=planner_instructions(),
-            output_type=ToolOutput(
+            output_type=NativeOutput(
                 ActionPlan,
                 name="submit_action_plan",
                 description="Return the complete bounded keyboard action plan.",
-                max_retries=1,
             ),
+            retries=1,
         )
 
     async def generate(
