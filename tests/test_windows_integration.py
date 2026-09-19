@@ -108,3 +108,53 @@ async def test_guarded_typing_into_owned_edit_control() -> None:
         pumping = False
         await pump_task
         root.destroy()
+
+
+@pytest.mark.asyncio
+async def test_capture_and_replace_owned_text_selection() -> None:
+    service = FocusService(lambda _: None)
+    service.start()
+    root = tk.Tk()
+    root.title("OmniVoice selection integration test")
+    root.geometry("360x100")
+    root.attributes("-topmost", True)
+    entry = tk.Entry(root)
+    entry.insert(0, "original text")
+    entry.selection_range(0, len("original"))
+    entry.pack(fill="x", padx=20, pady=25)
+    root.update()
+    entry.focus_force()
+    entry.selection_range(0, len("original"))
+    root.update()
+    if int(ctypes.windll.user32.GetForegroundWindow()) != int(root.winfo_id()):
+        root.destroy()
+        pytest.skip("Windows did not grant foreground focus to the temporary test window")
+
+    pumping = True
+
+    async def pump_window() -> None:
+        while pumping:
+            root.update()
+            await asyncio.sleep(0.01)
+
+    pump_task = asyncio.create_task(pump_window())
+    try:
+        await asyncio.sleep(0.05)
+        lease = await service.capture()
+        assert await service.watch(lease)
+        selection = await service.capture_selection(lease)
+        if selection is None:
+            pytest.skip("the Tk edit provider does not expose a UIA text selection")
+        assert selection.text == "original"
+        assert await service.selection_matches(selection)
+        executor = KeyboardExecutor(WindowsInputBackend())
+        await executor.type_text(
+            "rewritten", lambda: service.matches(lease), asyncio.Event()
+        )
+        root.update()
+        assert entry.get() == "rewritten text"
+    finally:
+        await service.stop()
+        pumping = False
+        await pump_task
+        root.destroy()

@@ -7,6 +7,7 @@ import logging
 import queue
 import sys
 import threading
+import uuid
 from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, Callable, Literal, TypeAlias
@@ -35,7 +36,28 @@ class FocusLease:
     control_type: int
 
 
-Operation: TypeAlias = Literal["capture", "matches", "watch", "clear", "stop"]
+MAX_SELECTED_TEXT_CHARACTERS = 4_000
+_SELECTION_READ_LIMIT = MAX_SELECTED_TEXT_CHARACTERS * 2 + 1
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionContext:
+    """Expose bounded selected text while the COM range stays on its owner thread."""
+
+    token: str
+    lease: FocusLease
+    text: str
+
+
+Operation: TypeAlias = Literal[
+    "capture",
+    "matches",
+    "watch",
+    "capture_selection",
+    "selection_matches",
+    "clear",
+    "stop",
+]
 
 
 @dataclass(slots=True)
@@ -45,6 +67,15 @@ class _Command:
     operation: Operation
     future: Future[Any]
     lease: FocusLease | None = None
+    selection: SelectionContext | None = None
+
+
+@dataclass(slots=True)
+class _SelectionSnapshot:
+    """Retain one cloned UIA range exclusively on the COM worker thread."""
+
+    context: SelectionContext
+    text_range: Any
 
 
 def leases_match(left: FocusLease, right: FocusLease) -> bool:
@@ -69,6 +100,7 @@ class FocusService:
         self._startup_error: BaseException | None = None
         self._thread: threading.Thread | None = None
         self._watched: FocusLease | None = None
+        self._selection: _SelectionSnapshot | None = None
 
     def start(self, timeout: float = 5.0) -> None:
         """Start the MTA worker and surface initialization failures immediately."""
@@ -107,6 +139,16 @@ class FocusService:
 
         await self._submit("clear")
 
+    async def capture_selection(self, lease: FocusLease) -> SelectionContext | None:
+        """Capture one bounded, non-empty selection for the focused lease."""
+
+        return await self._submit("capture_selection", lease=lease)
+
+    async def selection_matches(self, selection: SelectionContext) -> bool:
+        """Require the original focus, range endpoints, and text to remain unchanged."""
+
+        return await self._submit("selection_matches", selection=selection)
+
     async def stop(self, timeout: float = 5.0) -> None:
         """Remove the COM handler on its owner thread and wait for shutdown."""
 
@@ -119,13 +161,18 @@ class FocusService:
             raise FocusError("UI Automation thread did not stop cleanly")
         self._thread = None
 
-    async def _submit(self, operation: Operation, lease: FocusLease | None = None) -> Any:
+    async def _submit(
+        self,
+        operation: Operation,
+        lease: FocusLease | None = None,
+        selection: SelectionContext | None = None,
+    ) -> Any:
         """Bridge an asyncio caller to the blocking COM worker."""
 
         if self._thread is None or not self._thread.is_alive():
             raise FocusError("Focus service is not running")
         future: Future[Any] = Future()
-        self._commands.put(_Command(operation, future, lease))
+        self._commands.put(_Command(operation, future, lease, selection))
         return await asyncio.wrap_future(future)
 
     def _run(self) -> None:
@@ -182,11 +229,24 @@ class FocusService:
                         elif command.operation == "watch":
                             result = self._matches_current(automation, module, command.lease)
                             self._watched = command.lease if result else None
+                        elif command.operation == "capture_selection":
+                            self._selection = None
+                            result = self._capture_selection(
+                                automation, module, command.lease
+                            )
+                            self._selection = result
+                            result = result.context if result is not None else None
+                        elif command.operation == "selection_matches":
+                            result = self._selection_matches_current(
+                                automation, module, command.selection, self._selection
+                            )
                         elif command.operation == "clear":
                             self._watched = None
+                            self._selection = None
                             result = None
                         else:
                             self._watched = None
+                            self._selection = None
                             result = None
                             running = False
                         command.future.set_result(result)
@@ -203,6 +263,7 @@ class FocusService:
                             still_current = False
                         if not still_current:
                             self._watched = None
+                            self._selection = None
                             # The callback may enter application code only after
                             # COM work and identity comparison are complete.
                             self._on_focus_lost(watched)
@@ -242,22 +303,97 @@ class FocusService:
         return leases_match(current, lease)
 
     @staticmethod
+    def _capture_selection(
+        automation: Any, module: Any, lease: FocusLease | None
+    ) -> _SelectionSnapshot | None:
+        """Clone one selected range after proving it belongs to the active target."""
+
+        if lease is None or not FocusService._matches_current(automation, module, lease):
+            raise InvalidTargetError("Focus changed before the selection was captured")
+        element = FocusService._current_target(automation, module)
+        try:
+            unknown = element.GetCurrentPattern(module.UIA_TextPatternId)
+            text_pattern = unknown.QueryInterface(module.IUIAutomationTextPattern)
+        except BaseException:
+            return None
+
+        try:
+            ranges = text_pattern.GetSelection()
+            count = FocusService._required_int(ranges.Length, "selection range count")
+            if count == 0:
+                return None
+            if count != 1:
+                raise InvalidTargetError("Multiple text selections are not supported")
+            text_range = ranges.GetElement(0)
+            if not text_range:
+                raise InvalidTargetError("The selected text range is unavailable")
+            start = module.TextPatternRangeEndpoint_Start
+            end = module.TextPatternRangeEndpoint_End
+            if int(text_range.CompareEndpoints(start, text_range, end)) == 0:
+                return None
+            # UIA maxLength is UTF-16-oriented for some providers. Reading up to
+            # two code units per Python character still detects 4,001 astral chars.
+            text = str(text_range.GetText(_SELECTION_READ_LIMIT))
+            if len(text) > MAX_SELECTED_TEXT_CHARACTERS:
+                raise InvalidTargetError(
+                    f"Selected text exceeds {MAX_SELECTED_TEXT_CHARACTERS} characters"
+                )
+            if not text:
+                raise InvalidTargetError("The selected text is empty")
+            context = SelectionContext(uuid.uuid4().hex, lease, text)
+            cloned_range = text_range.Clone()
+            if not cloned_range:
+                raise InvalidTargetError("The selected text range could not be retained")
+            return _SelectionSnapshot(context, cloned_range)
+        except InvalidTargetError:
+            raise
+        except BaseException as exc:
+            raise FocusError(
+                "Windows UI Automation could not inspect the text selection"
+            ) from exc
+
+    @staticmethod
+    def _selection_matches_current(
+        automation: Any,
+        module: Any,
+        context: SelectionContext | None,
+        snapshot: _SelectionSnapshot | None,
+    ) -> bool:
+        """Compare the live selection with the retained range without exposing COM."""
+
+        if (
+            context is None
+            or snapshot is None
+            or context.token != snapshot.context.token
+            or context != snapshot.context
+            or not FocusService._matches_current(automation, module, context.lease)
+        ):
+            return False
+        try:
+            element = FocusService._current_target(automation, module)
+            unknown = element.GetCurrentPattern(module.UIA_TextPatternId)
+            text_pattern = unknown.QueryInterface(module.IUIAutomationTextPattern)
+            ranges = text_pattern.GetSelection()
+            if int(ranges.Length) != 1:
+                return False
+            current = ranges.GetElement(0)
+            start = module.TextPatternRangeEndpoint_Start
+            end = module.TextPatternRangeEndpoint_End
+            return (
+                int(current.CompareEndpoints(start, snapshot.text_range, start)) == 0
+                and int(current.CompareEndpoints(end, snapshot.text_range, end)) == 0
+                and str(current.GetText(_SELECTION_READ_LIMIT))
+                == context.text
+            )
+        except BaseException:
+            return False
+
+    @staticmethod
     def _capture(automation: Any, module: Any) -> FocusLease:
         """Build a lease only for a supported control proven to be writable."""
 
         try:
-            focused = automation.GetFocusedElement()
-            # comtypes represents a NULL interface as a false pointer object,
-            # not necessarily as Python's None.
-            if not focused:
-                raise InvalidTargetError("No control currently has keyboard focus")
-            if not bool(focused.CurrentHasKeyboardFocus):
-                raise InvalidTargetError("The focused control did not confirm keyboard focus")
-
-            # Browser and framework providers sometimes put keyboard focus on a
-            # text child inside the actual Edit control. Resolve that narrow case
-            # while requiring ComboBox and Document targets to hold focus directly.
-            element = FocusService._resolve_target(automation, module, focused)
+            element = FocusService._current_target(automation, module)
             if not bool(element.CurrentIsEnabled):
                 raise InvalidTargetError("The focused control is disabled")
             if not bool(element.CurrentIsKeyboardFocusable):
@@ -299,6 +435,19 @@ class FocusService:
             raise
         except BaseException as exc:
             raise FocusError(f"Windows UI Automation could not inspect focus: {exc}") from exc
+
+    @staticmethod
+    def _current_target(automation: Any, module: Any) -> Any:
+        """Return the focused supported control, normalizing narrow wrapper cases."""
+
+        focused = automation.GetFocusedElement()
+        # comtypes represents a NULL interface as a false pointer object,
+        # not necessarily as Python's None.
+        if not focused:
+            raise InvalidTargetError("No control currently has keyboard focus")
+        if not bool(focused.CurrentHasKeyboardFocus):
+            raise InvalidTargetError("The focused control did not confirm keyboard focus")
+        return FocusService._resolve_target(automation, module, focused)
 
     @staticmethod
     def _resolve_target(automation: Any, module: Any, focused: Any) -> Any:

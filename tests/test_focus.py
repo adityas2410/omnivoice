@@ -1,11 +1,15 @@
+from __future__ import annotations
+
 from types import SimpleNamespace
 
 import pytest
 
 from omnivoice.windows.focus import (
+    MAX_SELECTED_TEXT_CHARACTERS,
     FocusLease,
     FocusService,
     InvalidTargetError,
+    SelectionContext,
     leases_match,
 )
 
@@ -17,6 +21,8 @@ DOCUMENT = 50030
 VALUE_PATTERN = 10002
 TEXT_PATTERN = 10014
 IS_READ_ONLY_ATTRIBUTE = 40015
+RANGE_START = 0
+RANGE_END = 1
 
 
 class FakeUnknown:
@@ -35,17 +41,63 @@ class FakeValuePattern:
 
 
 class FakeTextRange:
-    def __init__(self, *, read_only: bool) -> None:
+    def __init__(
+        self,
+        *,
+        read_only: bool = False,
+        text: str = "",
+        start: int = 0,
+        end: int = 0,
+    ) -> None:
         self._read_only = read_only
+        self.text = text
+        self.start = start
+        self.end = end
 
     def GetAttributeValue(self, attribute_id: int) -> bool:
         assert attribute_id == IS_READ_ONLY_ATTRIBUTE
         return self._read_only
 
+    def GetText(self, max_length: int) -> str:
+        return self.text if max_length < 0 else self.text[:max_length]
+
+    def Clone(self) -> FakeTextRange:
+        return FakeTextRange(
+            read_only=self._read_only,
+            text=self.text,
+            start=self.start,
+            end=self.end,
+        )
+
+    def CompareEndpoints(
+        self, source_endpoint: int, other: FakeTextRange, target_endpoint: int
+    ) -> int:
+        source = self.start if source_endpoint == RANGE_START else self.end
+        target = other.start if target_endpoint == RANGE_START else other.end
+        return source - target
+
+
+class FakeTextRangeArray:
+    def __init__(self, ranges: list[FakeTextRange]) -> None:
+        self._ranges = ranges
+        self.Length = len(ranges)
+
+    def GetElement(self, index: int) -> FakeTextRange:
+        return self._ranges[index]
+
 
 class FakeTextPattern:
-    def __init__(self, *, read_only: bool) -> None:
+    def __init__(
+        self,
+        *,
+        read_only: bool,
+        selection: list[FakeTextRange] | None = None,
+    ) -> None:
         self.DocumentRange = FakeTextRange(read_only=read_only)
+        self.selection = selection or []
+
+    def GetSelection(self) -> FakeTextRangeArray:
+        return FakeTextRangeArray(self.selection)
 
 
 class FakeElement:
@@ -120,6 +172,8 @@ MODULE = SimpleNamespace(
     UIA_IsReadOnlyAttributeId=IS_READ_ONLY_ATTRIBUTE,
     IUIAutomationValuePattern=object(),
     IUIAutomationTextPattern=object(),
+    TextPatternRangeEndpoint_Start=RANGE_START,
+    TextPatternRangeEndpoint_End=RANGE_END,
 )
 
 
@@ -233,3 +287,127 @@ def test_null_com_parent_ends_target_resolution_safely() -> None:
 
 def test_control_type_name_identifies_combo_box() -> None:
     assert FocusService._control_type_name(MODULE, COMBO_BOX) == "ComboBox"
+
+
+def selection_target(ranges: list[FakeTextRange]) -> tuple[FakeAutomation, FocusLease]:
+    element = FakeElement(
+        EDIT,
+        (1, 2, 3),
+        patterns={
+            VALUE_PATTERN: FakeValuePattern(read_only=False),
+            TEXT_PATTERN: FakeTextPattern(read_only=False, selection=ranges),
+        },
+    )
+    automation = FakeAutomation(element)
+    return automation, FocusService._capture(automation, MODULE)
+
+
+def test_selection_capture_returns_none_without_text_pattern() -> None:
+    element = FakeElement(
+        EDIT,
+        (1, 2, 3),
+        patterns={VALUE_PATTERN: FakeValuePattern(read_only=False)},
+    )
+    automation = FakeAutomation(element)
+    lease = FocusService._capture(automation, MODULE)
+
+    assert FocusService._capture_selection(automation, MODULE, lease) is None
+
+
+def test_selection_capture_treats_degenerate_range_as_no_selection() -> None:
+    automation, lease = selection_target([FakeTextRange(start=4, end=4)])
+
+    assert FocusService._capture_selection(automation, MODULE, lease) is None
+
+
+def test_selection_capture_clones_one_bounded_range() -> None:
+    selected = FakeTextRange(text="selected words", start=4, end=18)
+    automation, lease = selection_target([selected])
+
+    snapshot = FocusService._capture_selection(automation, MODULE, lease)
+
+    assert snapshot is not None
+    assert snapshot.context.lease == lease
+    assert snapshot.context.text == "selected words"
+    assert snapshot.text_range is not selected
+    assert FocusService._selection_matches_current(
+        automation, MODULE, snapshot.context, snapshot
+    )
+
+
+def test_selection_capture_stops_multiple_ranges() -> None:
+    automation, lease = selection_target(
+        [
+            FakeTextRange(text="one", start=0, end=3),
+            FakeTextRange(text="two", start=5, end=8),
+        ]
+    )
+
+    with pytest.raises(InvalidTargetError, match="Multiple text selections"):
+        FocusService._capture_selection(automation, MODULE, lease)
+
+
+@pytest.mark.parametrize(
+    ("length", "allowed"),
+    [
+        (MAX_SELECTED_TEXT_CHARACTERS, True),
+        (MAX_SELECTED_TEXT_CHARACTERS + 1, False),
+    ],
+)
+def test_selection_capture_enforces_text_limit(length: int, allowed: bool) -> None:
+    automation, lease = selection_target(
+        [FakeTextRange(text="x" * length, start=0, end=length)]
+    )
+
+    if allowed:
+        snapshot = FocusService._capture_selection(automation, MODULE, lease)
+        assert snapshot is not None
+        assert len(snapshot.context.text) == length
+    else:
+        with pytest.raises(InvalidTargetError, match="exceeds 4000"):
+            FocusService._capture_selection(automation, MODULE, lease)
+
+
+def test_selection_capture_detects_oversized_astral_text() -> None:
+    text = "😀" * (MAX_SELECTED_TEXT_CHARACTERS + 1)
+    automation, lease = selection_target(
+        [FakeTextRange(text=text, start=0, end=len(text))]
+    )
+
+    with pytest.raises(InvalidTargetError, match="exceeds 4000"):
+        FocusService._capture_selection(automation, MODULE, lease)
+
+
+def test_selection_revalidation_detects_endpoint_or_text_changes() -> None:
+    current = FakeTextRange(text="same", start=2, end=6)
+    automation, lease = selection_target([current])
+    snapshot = FocusService._capture_selection(automation, MODULE, lease)
+    assert snapshot is not None
+
+    current.start = 8
+    current.end = 12
+    assert not FocusService._selection_matches_current(
+        automation, MODULE, snapshot.context, snapshot
+    )
+
+    current.start = 2
+    current.end = 6
+    current.text = "diff"
+    assert not FocusService._selection_matches_current(
+        automation, MODULE, snapshot.context, snapshot
+    )
+
+
+def test_selection_revalidation_requires_retained_matching_token() -> None:
+    current = FakeTextRange(text="same", start=2, end=6)
+    automation, lease = selection_target([current])
+    snapshot = FocusService._capture_selection(automation, MODULE, lease)
+    assert snapshot is not None
+    other = SelectionContext("other", lease, snapshot.context.text)
+
+    assert not FocusService._selection_matches_current(
+        automation, MODULE, other, snapshot
+    )
+    assert not FocusService._selection_matches_current(
+        automation, MODULE, snapshot.context, None
+    )
