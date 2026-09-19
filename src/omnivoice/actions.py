@@ -53,6 +53,12 @@ class ActionPlan(BaseModel):
     actions: tuple[Action, ...] = Field(max_length=MAX_PLAN_ACTIONS)
 
 
+def format_action_plan(plan: ActionPlan) -> str:
+    """Render the parsed model output as single-line JSON with controls escaped."""
+
+    return plan.model_dump_json()
+
+
 def validate_action_plan(plan: ActionPlan) -> ActionPlan:
     """Apply policy to the complete plan before its first action can execute."""
 

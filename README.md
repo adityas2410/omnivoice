@@ -105,6 +105,8 @@ action. Model-produced CR/LF line breaks are converted into separately guarded
 the code-owned allowlist stop the entire plan. Focus is checked before every
 action and between inserted characters. Execution stops without guessed rollback
 if focus changes, cancellation occurs, or Windows accepts only part of an input.
+The parsed model output is printed as single-line JSON before execution; control
+characters are escaped so the exact proposed structure remains visible.
 
 Groq requires `GROQ_API_KEY`. Local Ollama uses
 `http://localhost:11434/v1` without a key, but Ollama must be running and the

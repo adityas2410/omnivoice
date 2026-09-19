@@ -24,6 +24,7 @@ from pydantic_ai.usage import UsageLimits
 from omnivoice.actions import (
     ActionPlan,
     ActionPlanRejected,
+    format_action_plan,
     planner_instructions,
     validate_action_plan,
 )
@@ -138,7 +139,12 @@ class ActionPlanGenerator:
                 plan = await run_task
             if cancelled.is_set():
                 raise asyncio.CancelledError
-            return validate_action_plan(plan)
+            try:
+                return validate_action_plan(plan)
+            except ActionPlanRejected as exc:
+                raise ActionPlanRejected(
+                    f"{exc} Model output: {format_action_plan(plan)}"
+                ) from exc
         except asyncio.CancelledError:
             raise
         except TimeoutError as exc:

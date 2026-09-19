@@ -398,6 +398,7 @@ async def test_literal_dictation_never_calls_action_planner(tmp_path: Path) -> N
 async def test_agent_request_executes_validated_text_and_shortcut(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    statuses: list[str] = []
     planner = FakePlanner(
         ActionPlan(
             actions=(
@@ -408,7 +409,7 @@ async def test_agent_request_executes_validated_text_and_shortcut(
         )
     )
     controller, backend, _, stt, tts = make_controller(
-        tmp_path, planner=planner, models=configured_models()
+        tmp_path, planner=planner, models=configured_models(), statuses=statuses
     )
 
     with caplog.at_level(logging.INFO):
@@ -426,6 +427,9 @@ async def test_agent_request_executes_validated_text_and_shortcut(
     assert len(backend.sent) == len("First sentence.Second sentence.") + 1
     assert controller.last_outcome is RequestState.COMPLETED
     assert tts.messages == ["Done."]
+    assert any(
+        status.startswith('Model output: {"actions":') for status in statuses
+    )
     assert stt.transcript not in caplog.text
     assert "hello" not in caplog.text
 

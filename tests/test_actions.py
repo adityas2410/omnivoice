@@ -7,6 +7,7 @@ from omnivoice.actions import (
     ActionPlanRejected,
     InsertTextAction,
     ShortcutAction,
+    format_action_plan,
     planner_instructions,
     validate_action_plan,
 )
@@ -31,6 +32,17 @@ def test_valid_plan_preserves_short_sequence() -> None:
 
 def test_empty_plan_is_structurally_valid_for_unsupported_request() -> None:
     assert validate_action_plan(ActionPlan(actions=())).actions == ()
+
+
+def test_model_output_format_is_single_line_json_with_escaped_controls() -> None:
+    plan = ActionPlan(
+        actions=(InsertTextAction(type="insert_text", text="first\nsecond"),)
+    )
+
+    rendered = format_action_plan(plan)
+
+    assert "\\n" in rendered
+    assert "\n" not in rendered
 
 
 @pytest.mark.parametrize(

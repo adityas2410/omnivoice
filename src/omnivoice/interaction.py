@@ -13,6 +13,7 @@ from omnivoice.actions import (
     ActionPlanRejected,
     InsertTextAction,
     ShortcutAction,
+    format_action_plan,
     validate_action_plan,
 )
 from omnivoice.models import ModelRegistry, ModelSelection
@@ -322,6 +323,7 @@ class InteractionController:
                         transcript, selection, self._cancelled
                     )
                 )
+                self._status(f"Model output: {format_action_plan(plan)}")
                 if not plan.actions:
                     raise _RequestRejected(
                         "The request cannot be completed with the permitted actions."

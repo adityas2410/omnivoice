@@ -129,12 +129,15 @@ async def test_policy_rejection_is_not_misreported_as_provider_failure() -> None
         )
     )
 
-    with pytest.raises(ActionPlanRejected, match="unsupported shortcut"):
+    with pytest.raises(ActionPlanRejected, match="unsupported shortcut") as error:
         await generator.generate(
             "close this",
             ModelSelection("test", "groq:test"),
             asyncio.Event(),
         )
+
+    assert 'Model output: {"actions":' in str(error.value)
+    assert '"keys":["alt","f4"]' in str(error.value)
 
 
 @pytest.mark.asyncio
