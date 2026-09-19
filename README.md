@@ -124,7 +124,10 @@ fields and may return:
 
 The selected text is treated as source material, never as instructions. It is sent
 only to the selected model and is not written to logs. Multiline replacements use
-guarded Enter presses. Multiple selections, selections above 4,000 characters,
+guarded Enter presses. If a model expresses replacement continuation as immediate
+`Enter` or `insert_text` actions, OmniVoice first folds those fragments into the
+single replacement and then validates the complete result. Multiple selections,
+selections above 4,000 characters,
 changed selections, and implicit `insert_text` or `Enter` actions over a selection
 stop without keyboard input. `Ctrl+S` and `Ctrl+Z` remain available without
 consuming the selection.

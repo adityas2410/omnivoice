@@ -506,6 +506,44 @@ async def test_agent_replaces_stable_selection_with_multiline_text_and_saves(
 
 
 @pytest.mark.asyncio
+async def test_agent_folds_trailing_enter_into_selection_replacement(
+    tmp_path: Path,
+) -> None:
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection", LEASE, "original text")
+    planner = FakePlanner(
+        ActionPlan(
+            actions=(
+                ReplaceSelectionAction(
+                    type="replace_selection", text="Replacement sentence."
+                ),
+                ShortcutAction(type="shortcut", keys=("enter",)),
+            )
+        )
+    )
+    statuses: list[str] = []
+    controller, backend, _, _, tts = make_controller(
+        tmp_path,
+        focus=focus,
+        planner=planner,
+        models=configured_models(),
+        statuses=statuses,
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert len(backend.sent) == len("Replacement sentence.") + 1
+    assert focus.selection_checks == 2
+    assert focus.clears == 1
+    assert controller.last_outcome is RequestState.COMPLETED
+    assert tts.messages == ["Done."]
+    assert any('"text":"Replacement sentence.\\n"' in status for status in statuses)
+
+
+@pytest.mark.asyncio
 async def test_selection_change_after_transcription_prevents_model_and_input(
     tmp_path: Path,
 ) -> None:

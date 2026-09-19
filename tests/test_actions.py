@@ -187,7 +187,41 @@ def test_active_selection_still_allows_non_text_shortcuts() -> None:
         assert validate_action_plan(plan, has_selection=True) is plan
 
 
-def test_selection_replacement_must_be_unique_first_and_terminal_for_text() -> None:
+def test_selection_replacement_normalizes_following_text_fragments() -> None:
+    plan = ActionPlan(
+        actions=(
+            ReplaceSelectionAction(type="replace_selection", text="First line."),
+            ShortcutAction(type="shortcut", keys=("enter",)),
+            InsertTextAction(type="insert_text", text="Second line."),
+            ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+        )
+    )
+
+    validated = validate_action_plan(plan, has_selection=True)
+
+    assert validated == ActionPlan(
+        actions=(
+            ReplaceSelectionAction(
+                type="replace_selection", text="First line.\nSecond line."
+            ),
+            ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+        )
+    )
+
+
+def test_selection_replacement_normalization_obeys_text_limit() -> None:
+    plan = ActionPlan(
+        actions=(
+            ReplaceSelectionAction(type="replace_selection", text="a" * 2_000),
+            ShortcutAction(type="shortcut", keys=("enter",)),
+        )
+    )
+
+    with pytest.raises(ActionPlanRejected, match="safe typing limit"):
+        validate_action_plan(plan, has_selection=True)
+
+
+def test_selection_replacement_must_be_unique_first_and_terminal_after_save() -> None:
     replacement = ReplaceSelectionAction(type="replace_selection", text="replacement")
     invalid_plans = (
         ActionPlan(
@@ -198,10 +232,11 @@ def test_selection_replacement_must_be_unique_first_and_terminal_for_text() -> N
         ),
         ActionPlan(actions=(replacement, replacement)),
         ActionPlan(
-            actions=(replacement, InsertTextAction(type="insert_text", text="more"))
-        ),
-        ActionPlan(
-            actions=(replacement, ShortcutAction(type="shortcut", keys=("enter",)))
+            actions=(
+                replacement,
+                ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+                ShortcutAction(type="shortcut", keys=("enter",)),
+            )
         ),
     )
 
