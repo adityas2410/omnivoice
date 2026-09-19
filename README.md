@@ -13,8 +13,8 @@ Press hotkey
 → record while the hotkey remains held
 → transcribe locally after release
 → literal hotkey: type the transcript
-→ agent hotkey: generate and validate one complete action plan
-→ revalidate focus and released modifiers before guarded SendInput
+→ agent hotkey: revalidate any captured selection, then generate one action plan
+→ revalidate focus, selection when used, and released modifiers before guarded SendInput
 ```
 
 Changing fields or windows cancels the remaining request. OmniVoice never restores focus and never attempts an automatic rollback. During insertion it checks the focus lease between logical characters and emits UTF-16 surrogate pairs atomically.
@@ -94,6 +94,7 @@ execution loop.
 The initial action vocabulary is deliberately small:
 
 - Insert at most 2,000 printable Unicode characters at the caret.
+- Replace one explicitly selected range with at most 2,000 generated characters.
 - Send exactly `Enter`, `Ctrl+S`, or `Ctrl+Z`.
 - Execute at most five actions in one plan.
 
@@ -107,6 +108,30 @@ action and between inserted characters. Execution stops without guessed rollback
 if focus changes, cancellation occurs, or Windows accepts only part of an input.
 The parsed model output is printed as single-line JSON before execution; control
 characters are escaped so the exact proposed structure remains visible.
+
+### Transform selected text
+
+To rewrite, summarize, correct, or translate existing text, highlight one contiguous
+range before pressing the agent hotkey. OmniVoice reads at most 4,000 selected
+characters through Windows UI Automation, keeps the captured range on its UIA
+worker, and checks the exact range and contents again before model use and before
+typing. The model receives the spoken request and selected text as separate JSON
+fields and may return:
+
+```json
+{"actions":[{"type":"replace_selection","text":"Rewritten text"}]}
+```
+
+The selected text is treated as source material, never as instructions. It is sent
+only to the selected model and is not written to logs. Multiline replacements use
+guarded Enter presses. Multiple selections, selections above 4,000 characters,
+changed selections, and implicit `insert_text` or `Enter` actions over a selection
+stop without keyboard input. `Ctrl+S` and `Ctrl+Z` remain available without
+consuming the selection.
+
+Controls that expose only `ValuePattern` continue to support ordinary caret
+insertion but cannot use selection-aware transformation. OmniVoice does not use
+the clipboard, navigate with arrow keys, delete selections, or replace whole fields.
 
 Groq requires `GROQ_API_KEY`. Local Ollama uses
 `http://localhost:11434/v1` without a key, but Ollama must be running and the
