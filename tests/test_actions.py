@@ -52,11 +52,46 @@ def test_malformed_plans_fail_schema_validation(payload: object) -> None:
         ActionPlan.model_validate(payload)
 
 
-@pytest.mark.parametrize("text", ["line\nnext", "a\tb", "nul\x00value", "escape\x1b"])
+@pytest.mark.parametrize("text", ["a\tb", "nul\x00value", "escape\x1b", "a\vvalue"])
 def test_control_characters_are_rejected_before_execution(text: str) -> None:
     plan = ActionPlan(actions=(InsertTextAction(type="insert_text", text=text),))
 
     with pytest.raises(ActionPlanRejected, match="control character"):
+        validate_action_plan(plan)
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+def test_line_breaks_become_guarded_enter_actions(separator: str) -> None:
+    plan = ActionPlan(
+        actions=(
+            InsertTextAction(
+                type="insert_text",
+                text=f"First sentence.{separator}Second sentence.",
+            ),
+        )
+    )
+
+    validated = validate_action_plan(plan)
+
+    assert [action.type for action in validated.actions] == [
+        "insert_text",
+        "shortcut",
+        "insert_text",
+    ]
+    assert validated.actions[1] == ShortcutAction(type="shortcut", keys=("enter",))
+
+
+def test_line_break_expansion_still_obeys_action_limit() -> None:
+    plan = ActionPlan(
+        actions=(
+            InsertTextAction(type="insert_text", text="one\ntwo"),
+            InsertTextAction(type="insert_text", text="three"),
+            InsertTextAction(type="insert_text", text="four"),
+            InsertTextAction(type="insert_text", text="five"),
+        )
+    )
+
+    with pytest.raises(ActionPlanRejected, match="safe action limit"):
         validate_action_plan(plan)
 
 
@@ -90,6 +125,8 @@ def test_prompt_derives_allowed_chords_without_intent_mappings() -> None:
 
     assert ALLOWED_SHORTCUTS == (("enter",), ("ctrl", "s"), ("ctrl", "z"))
     assert "enter" in instructions
+    assert "line break" in instructions
+    assert "CR or LF" in instructions
     assert "ctrl+s" in instructions
     assert "ctrl+z" in instructions
     assert "save" not in instructions.lower()

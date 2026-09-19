@@ -56,12 +56,13 @@ class ActionPlan(BaseModel):
 def validate_action_plan(plan: ActionPlan) -> ActionPlan:
     """Apply policy to the complete plan before its first action can execute."""
 
+    plan = _expand_line_breaks(plan)
     text_characters = 0
     for action in plan.actions:
         if isinstance(action, InsertTextAction):
             if any(not character.isprintable() for character in action.text):
                 raise ActionPlanRejected(
-                    "Generated text contained a control character and was rejected."
+                    "Generated text contained an unsupported control character."
                 )
             text_characters += len(action.text)
             if text_characters > MAX_PLAN_TEXT_CHARACTERS:
@@ -71,6 +72,35 @@ def validate_action_plan(plan: ActionPlan) -> ActionPlan:
         elif tuple(action.keys) not in _ALLOWED_SHORTCUT_SET:
             raise ActionPlanRejected("The plan requested an unsupported shortcut.")
     return plan
+
+
+def _expand_line_breaks(plan: ActionPlan) -> ActionPlan:
+    """Convert model-produced CR/LF text into separately guarded Enter actions."""
+
+    expanded: list[Action] = []
+    changed = False
+    for action in plan.actions:
+        if not isinstance(action, InsertTextAction) or not any(
+            character in action.text for character in ("\r", "\n")
+        ):
+            expanded.append(action)
+            continue
+
+        changed = True
+        parts = action.text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        for index, part in enumerate(parts):
+            if part:
+                expanded.append(InsertTextAction(type="insert_text", text=part))
+            if index < len(parts) - 1:
+                expanded.append(ShortcutAction(type="shortcut", keys=("enter",)))
+            if len(expanded) > MAX_PLAN_ACTIONS:
+                raise ActionPlanRejected(
+                    "The generated plan exceeded the safe action limit."
+                )
+
+    if len(expanded) > MAX_PLAN_ACTIONS:
+        raise ActionPlanRejected("The generated plan exceeded the safe action limit.")
+    return ActionPlan(actions=tuple(expanded)) if changed else plan
 
 
 def planner_instructions() -> str:
@@ -83,7 +113,10 @@ def planner_instructions() -> str:
         "Use shortcut for a Windows key chord. "
         f"The only permitted shortcut chords are: {shortcuts}. "
         "Use your knowledge of Windows shortcuts to choose a permitted chord; "
-        "do not invent keys or actions. Return actions in execution order. "
+        "do not invent keys or actions. For a requested line break, end the current "
+        "insert_text action, return the enter shortcut, and then start another "
+        "insert_text action; never place CR or LF characters inside text. "
+        "Return actions in execution order. "
         "If the request cannot be completed using only these actions, return an "
         "empty actions list. Never include control characters in inserted text."
     )

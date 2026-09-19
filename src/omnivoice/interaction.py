@@ -293,7 +293,7 @@ class InteractionController:
             ):
                 self._status("No speech detected.")
                 await self._speak(
-                    "Request rejected."
+                    "Request not completed."
                     if mode is RequestMode.AGENT
                     else "No speech detected."
                 )
@@ -332,14 +332,14 @@ class InteractionController:
             self._finish(RequestState.COMPLETED)
             await self._speak("Done.")
         except InvalidTargetError as exc:
-            message = f"Target rejected: {exc}"
+            message = f"Target unavailable: {exc}"
             if armed:
                 message += " Self-test authorization was consumed; run /selftest arm again."
             self._status(message)
-            LOGGER.info("event=target_rejected reason=%s", type(exc).__name__)
+            LOGGER.info("event=target_unavailable reason=%s", type(exc).__name__)
             self._finish(RequestState.CANCELLED)
             await self._speak(
-                "Request rejected."
+                "Request not completed."
                 if mode is RequestMode.AGENT
                 else "That field isn't supported."
             )
@@ -350,10 +350,10 @@ class InteractionController:
             self._finish(RequestState.CANCELLED)
             await self._speak("Cancelled.")
         except (ActionPlanRejected, _RequestRejected) as exc:
-            self._status(str(exc) or "The request was rejected.")
-            LOGGER.info("event=request_rejected reason=%s", type(exc).__name__)
+            self._status(str(exc) or "The request could not be completed.")
+            LOGGER.info("event=request_not_completed reason=%s", type(exc).__name__)
             self._finish(RequestState.CANCELLED)
-            await self._speak("Request rejected.")
+            await self._speak("Request not completed.")
         except asyncio.CancelledError:
             self._cancelled.set()
             if self.state is not RequestState.IDLE:

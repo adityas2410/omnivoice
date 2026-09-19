@@ -100,8 +100,9 @@ The initial action vocabulary is deliberately small:
 The model receives the permitted chord list and uses its own Windows knowledge to
 interpret requests such as “put the second sentence on a new line”; the prompt
 does not contain a mapping for every phrase. OmniVoice validates the complete returned plan before its first
-action. Unknown actions, extra fields, control characters, and any shortcut not in
-the code-owned allowlist reject the entire plan. Focus is checked before every
+action. Model-produced CR/LF line breaks are converted into separately guarded
+`Enter` actions. Unknown actions, extra fields, other control characters, and any shortcut not in
+the code-owned allowlist stop the entire plan. Focus is checked before every
 action and between inserted characters. Execution stops without guessed rollback
 if focus changes, cancellation occurs, or Windows accepts only part of an input.
 

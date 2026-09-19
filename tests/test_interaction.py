@@ -451,7 +451,7 @@ async def test_agent_without_configured_model_rejects_before_recording(
     assert stt.calls == 0
     assert backend.sent == []
     assert any("No agent model" in status for status in statuses)
-    assert tts.messages == ["Request rejected."]
+    assert tts.messages == ["Request not completed."]
 
 
 @pytest.mark.asyncio
@@ -555,7 +555,7 @@ async def test_whole_plan_policy_rejection_happens_before_first_action(
 
     assert backend.sent == []
     assert controller.last_outcome is RequestState.CANCELLED
-    assert tts.messages == ["Request rejected."]
+    assert tts.messages == ["Request not completed."]
 
 
 @pytest.mark.asyncio
