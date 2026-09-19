@@ -94,12 +94,12 @@ execution loop.
 The initial action vocabulary is deliberately small:
 
 - Insert at most 2,000 printable Unicode characters at the caret.
-- Send exactly `Ctrl+S` or `Ctrl+Z`.
+- Send exactly `Enter`, `Ctrl+S`, or `Ctrl+Z`.
 - Execute at most five actions in one plan.
 
 The model receives the permitted chord list and uses its own Windows knowledge to
-interpret requests such as “save this”; the prompt does not contain a mapping for
-every phrase. OmniVoice validates the complete returned plan before its first
+interpret requests such as “put the second sentence on a new line”; the prompt
+does not contain a mapping for every phrase. OmniVoice validates the complete returned plan before its first
 action. Unknown actions, extra fields, control characters, and any shortcut not in
 the code-owned allowlist reject the entire plan. Focus is checked before every
 action and between inserted characters. Execution stops without guessed rollback

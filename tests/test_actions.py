@@ -16,8 +16,9 @@ def test_valid_plan_preserves_short_sequence() -> None:
     plan = ActionPlan.model_validate(
         {
             "actions": [
-                {"type": "insert_text", "text": "Generated response"},
-                {"type": "shortcut", "keys": ["ctrl", "s"]},
+                {"type": "insert_text", "text": "First sentence."},
+                {"type": "shortcut", "keys": ["enter"]},
+                {"type": "insert_text", "text": "Second sentence."},
             ]
         }
     )
@@ -25,6 +26,7 @@ def test_valid_plan_preserves_short_sequence() -> None:
     assert validate_action_plan(plan) is plan
     assert isinstance(plan.actions[0], InsertTextAction)
     assert isinstance(plan.actions[1], ShortcutAction)
+    assert isinstance(plan.actions[2], InsertTextAction)
 
 
 def test_empty_plan_is_structurally_valid_for_unsupported_request() -> None:
@@ -86,7 +88,8 @@ def test_unlisted_shortcuts_are_rejected_as_complete_chords(
 def test_prompt_derives_allowed_chords_without_intent_mappings() -> None:
     instructions = planner_instructions()
 
-    assert ALLOWED_SHORTCUTS == (("ctrl", "s"), ("ctrl", "z"))
+    assert ALLOWED_SHORTCUTS == (("enter",), ("ctrl", "s"), ("ctrl", "z"))
+    assert "enter" in instructions
     assert "ctrl+s" in instructions
     assert "ctrl+z" in instructions
     assert "save" not in instructions.lower()

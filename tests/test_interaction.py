@@ -401,8 +401,9 @@ async def test_agent_request_executes_validated_text_and_shortcut(
     planner = FakePlanner(
         ActionPlan(
             actions=(
-                InsertTextAction(type="insert_text", text="hello"),
-                ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+                InsertTextAction(type="insert_text", text="First sentence."),
+                ShortcutAction(type="shortcut", keys=("enter",)),
+                InsertTextAction(type="insert_text", text="Second sentence."),
             )
         )
     )
@@ -422,7 +423,7 @@ async def test_agent_request_executes_validated_text_and_shortcut(
             ModelSelection("groq-fast", "groq:openai/gpt-oss-20b"),
         )
     ]
-    assert len(backend.sent) == len("hello") + 1
+    assert len(backend.sent) == len("First sentence.Second sentence.") + 1
     assert controller.last_outcome is RequestState.COMPLETED
     assert tts.messages == ["Done."]
     assert stt.transcript not in caplog.text

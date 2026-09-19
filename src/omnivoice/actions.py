@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 MAX_PLAN_ACTIONS = 5
 MAX_PLAN_TEXT_CHARACTERS = 2_000
 ALLOWED_SHORTCUTS: tuple[tuple[str, ...], ...] = (
+    ("enter",),
     ("ctrl", "s"),
     ("ctrl", "z"),
 )
