@@ -1,6 +1,6 @@
 import pytest
 
-from omnivoice.config import AgentConfig
+from omnivoice.config import AgentConfig, ModelProfileConfig
 from omnivoice.models import ModelRegistry, ModelSelection, ModelSelectionError
 
 
@@ -65,3 +65,22 @@ def test_empty_registry_has_no_snapshot() -> None:
     assert registry.configured == ()
     assert registry.snapshot() is None
     assert registry.describe_status() == "agent_model=not configured"
+
+
+def test_expanded_profile_budget_is_snapshotted_and_strings_use_fallback() -> None:
+    registry = ModelRegistry(
+        AgentConfig(
+            default_model="large",
+            models={
+                "large": ModelProfileConfig(
+                    selector="groq:openai/gpt-oss-120b",
+                    input_token_budget=100_000,
+                ),
+                "local": "ollama:qwen3:8b",
+            },
+        )
+    )
+
+    assert registry.snapshot().input_token_budget == 100_000  # type: ignore[union-attr]
+    local, _ = registry.select("local")
+    assert local.input_token_budget == 48_000

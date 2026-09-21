@@ -38,38 +38,72 @@ CREDENTIALS_TEMPLATE = """# OmniVoice provider credentials. Keep this file priva
 """
 
 
+DEFAULT_MODEL_INPUT_TOKEN_BUDGET = 48_000
+
+
+def _validate_model_selector(selector: str, alias: str) -> str:
+    if selector != selector.strip() or any(char.isspace() for char in selector):
+        raise ValueError(f"model selector for {alias!r} must not contain whitespace")
+    provider, separator, model_name = selector.partition(":")
+    if not separator or not model_name:
+        raise ValueError(f"model selector for {alias!r} must use '<provider>:<model>'")
+    if provider not in {"groq", "ollama"}:
+        raise ValueError(
+            f"model selector for {alias!r} uses unsupported provider {provider!r}"
+        )
+    return selector
+
+
+class ModelProfileConfig(BaseModel):
+    """Optionally attach an estimated input budget to one model profile."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    selector: str
+    input_token_budget: int = Field(
+        default=DEFAULT_MODEL_INPUT_TOKEN_BUDGET, ge=2_048, le=1_000_000
+    )
+
+
+class AgentContextConfig(BaseModel):
+    """Bound opt-in request-scoped Windows UI Automation context."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: Literal["off", "uia"] = "off"
+    document_max_characters: int = Field(default=50_000, ge=1_000, le=500_000)
+    semantic_max_characters: int = Field(default=20_000, ge=1_000, le=200_000)
+    semantic_max_elements: int = Field(default=500, ge=10, le=5_000)
+    semantic_max_depth: int = Field(default=16, ge=1, le=64)
+    target_before_max_characters: int = Field(default=16_000, ge=0, le=200_000)
+    target_after_max_characters: int = Field(default=8_000, ge=0, le=200_000)
+    capture_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+
+
 class AgentConfig(BaseModel):
     """Validate named agent models without contacting their providers."""
 
     model_config = ConfigDict(extra="forbid")
 
     default_model: str | None = None
-    models: dict[str, str] = Field(default_factory=dict)
+    models: dict[str, str | ModelProfileConfig] = Field(default_factory=dict)
+    context: AgentContextConfig = Field(default_factory=AgentContextConfig)
 
     @field_validator("models")
     @classmethod
-    def validate_models(cls, models: dict[str, str]) -> dict[str, str]:
+    def validate_models(
+        cls, models: dict[str, str | ModelProfileConfig]
+    ) -> dict[str, str | ModelProfileConfig]:
         """Keep aliases predictable and selectors provider-qualified."""
 
-        for alias, selector in models.items():
+        for alias, profile in models.items():
             if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", alias):
                 raise ValueError(
                     "model aliases must contain only lowercase letters, digits, "
                     "hyphens, or underscores"
                 )
-            if selector != selector.strip() or any(
-                char.isspace() for char in selector
-            ):
-                raise ValueError(f"model selector for {alias!r} must not contain whitespace")
-            provider, separator, model_name = selector.partition(":")
-            if not separator or not model_name:
-                raise ValueError(
-                    f"model selector for {alias!r} must use '<provider>:<model>'"
-                )
-            if provider not in {"groq", "ollama"}:
-                raise ValueError(
-                    f"model selector for {alias!r} uses unsupported provider {provider!r}"
-                )
+            selector = profile if isinstance(profile, str) else profile.selector
+            _validate_model_selector(selector, alias)
         return models
 
     @model_validator(mode="after")
@@ -272,6 +306,7 @@ def config_for_logging(config: OmniVoiceConfig) -> dict[str, Any]:
     return {
         "agent_default_model": config.agent.default_model,
         "agent_model_count": len(config.agent.models),
+        "agent_context_mode": config.agent.context.mode,
         "push_to_talk": config.hotkey.push_to_talk,
         "agent_push_to_talk": config.hotkey.agent_push_to_talk,
         "stt_enabled": config.speech.stt.enabled,

@@ -30,6 +30,8 @@ def test_missing_default_config_is_created_without_assumed_models(
     assert "OLLAMA_API_KEY=" not in credentials
     assert config.agent.default_model is None
     assert config.agent.models == {}
+    assert config.agent.context.mode == "off"
+    assert config.agent.context.document_max_characters == 50_000
     written = yaml.safe_load(expected_path.read_text(encoding="utf-8"))
     assert "API keys belong in" in expected_path.read_text(encoding="utf-8")
     assert written["agent"]["default_model"] is None
@@ -198,6 +200,39 @@ agent:
     assert config.agent.models["ollama-local"] == "ollama:qwen3:8b"
 
 
+def test_expanded_model_profile_and_context_limits_load(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+agent:
+  default_model: groq-fast
+  models:
+    groq-fast:
+      selector: groq:openai/gpt-oss-20b
+      input_token_budget: 100000
+  context:
+    mode: uia
+    document_max_characters: 75000
+    semantic_max_characters: 30000
+    semantic_max_elements: 700
+    semantic_max_depth: 20
+    target_before_max_characters: 20000
+    target_after_max_characters: 10000
+    capture_timeout_seconds: 7
+""",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(path)
+    profile = config.agent.models["groq-fast"]
+
+    assert profile.selector == "groq:openai/gpt-oss-20b"  # type: ignore[union-attr]
+    assert profile.input_token_budget == 100_000  # type: ignore[union-attr]
+    assert config.agent.context.mode == "uia"
+    assert config.agent.context.semantic_max_elements == 700
+    assert config.agent.context.capture_timeout_seconds == 7
+
+
 @pytest.mark.parametrize(
     "yaml_text",
     [
@@ -210,6 +245,9 @@ agent:
         "agent:\n  default_model: local\n  models:\n    local: openai:gpt-5\n",
         "agent:\n  default_model: local\n  models:\n    local: 'ollama:'\n",
         "agent:\n  default_model: local\n  models:\n    local: ' ollama:qwen3'\n",
+        "agent:\n  default_model: local\n  models:\n    local:\n      selector: ollama:qwen3:8b\n      input_token_budget: 100\n",
+        "agent:\n  context:\n    mode: automatic\n",
+        "agent:\n  context:\n    capture_timeout_seconds: 0\n",
     ],
 )
 def test_invalid_agent_model_configuration_fails(
