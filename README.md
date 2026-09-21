@@ -91,6 +91,29 @@ and starts one structured model run, with at most one schema-correction retry.
 This path has no conversation history, model tools, screen access, or autonomous
 execution loop.
 
+### Active-window context
+
+The agent hotkey can optionally read bounded semantic context from the application
+window containing the focused target. Enable it persistently with
+`agent.context.mode: uia` or for the current session with `/context on`. Literal
+dictation never performs context capture.
+
+When enabled, OmniVoice independently captures up to 50,000 characters of document
+text, a structured UI Automation outline of up to 500 elements and 20,000 serialized
+characters, and up to 16,000 characters before plus 8,000 after the caret or
+selection. The semantic outline preserves useful headings, lists, links, buttons,
+labels, states, hierarchy, and the focused element while filtering unrelated browser
+chrome, decorative nodes, password controls, repeated passive text, and editable
+values. Limits are configurable.
+
+Capture runs on a separate read-only COM worker with a five-second deadline. Focus,
+window, and retained-selection identity are checked before and after capture. A slow
+or incomplete accessibility provider yields partial or unavailable context without
+granting new actions or blocking the focus-safety worker. Document and UI content are
+untrusted model data: instructions embedded in a page cannot expand the action schema
+or shortcut allowlist. No screenshots, OCR, mouse input, navigation, or model tools
+are involved.
+
 The initial action vocabulary is deliberately small:
 
 - Insert at most 2,000 printable Unicode characters at the caret.
@@ -165,6 +188,9 @@ Authorization is one-shot and is consumed by the attempt, including a rejected o
 /status        Show both hotkeys, model, request, speech, microphone, and self-test state
 /models        Show agent models configured in YAML
 /model NAME    Select an agent model for this session
+/context       Show active-window UI context state
+/context on    Enable UI context for this session
+/context off   Disable UI context for this session
 /selftest arm  Permit one guarded dictation-hotkey insertion for 30 seconds
 /cancel        Cancel recording, transcription, processing, or typing
 /quit          Shut down and unregister all workers and Windows handlers
@@ -190,6 +216,15 @@ The generated file looks like:
 agent:
   default_model: null
   models: {}
+  context:
+    mode: "off"
+    document_max_characters: 50000
+    semantic_max_characters: 20000
+    semantic_max_elements: 500
+    semantic_max_depth: 16
+    target_before_max_characters: 16000
+    target_after_max_characters: 8000
+    capture_timeout_seconds: 5
 
 hotkey:
   push_to_talk: "ctrl+alt+space"
@@ -228,14 +263,23 @@ example:
 agent:
   default_model: "groq-fast"
   models:
-    groq-fast: "groq:openai/gpt-oss-20b"
-    ollama-local: "ollama:qwen3:8b"
+    groq-fast:
+      selector: "groq:openai/gpt-oss-20b"
+      input_token_budget: 100000
+    ollama-local:
+      selector: "ollama:qwen3:8b"
+      input_token_budget: 12000
 ```
 
 Agent models use named profiles so `/model NAME` can change the active model for
 the current process. `default_model` is restored whenever OmniVoice starts and
 must name an entry in `models`; runtime switching never rewrites the YAML file.
 `/models` only displays configured profiles and does not contact Groq or Ollama.
+The original `alias: "provider:model"` form remains valid and uses a 48,000-token
+estimated input budget. Expanded profiles can set `input_token_budget` for the
+selected model. OmniVoice estimates request size deterministically from UTF-8 bytes,
+keeps the spoken request and selection intact, and trims duplicate semantic detail,
+distant document text, then distant caret context when necessary.
 OmniVoice also creates an instruction-only `%APPDATA%\OmniVoice\.env` and prints
 that path during startup. Model selectors determine credential lookup:
 `groq:...` reads `GROQ_API_KEY`, while local `ollama:...` uses its
@@ -261,7 +305,12 @@ Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plu
 
 ## Privacy and logs
 
-Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. Literal dictation contacts no LLM. Only the transcript produced by the agent hotkey is sent to its snapshotted Groq or local Ollama model.
+Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. Literal dictation contacts no LLM. The agent hotkey sends its transcript and, only when context is enabled, request-scoped selected text, target context, document text, and semantic UI structure to its snapshotted Groq or local Ollama model.
+
+Captured UI context exists only for the current request. It is not printed, logged,
+stored, added to future requests, or persisted as conversation history. Terminal
+messages expose only source availability, character counts, element counts, and
+truncation state.
 
 Operational logs contain provider and model names, timings, state changes, byte and character counts, control metadata, and error categories. They do not contain credentials, audio, transcript text, prompts, model responses, generated text, spoken status content, focused-control contents, subprocess output, or temporary filenames.
 

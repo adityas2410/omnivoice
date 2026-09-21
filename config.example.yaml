@@ -1,9 +1,22 @@
 agent:
   default_model: "groq-fast"
   models:
-    groq-fast: "groq:openai/gpt-oss-20b"
+    groq-fast:
+      selector: "groq:openai/gpt-oss-20b"
+      input_token_budget: 100000
     groq-large: "groq:openai/gpt-oss-120b"
-    ollama-local: "ollama:qwen3:8b"
+    ollama-local:
+      selector: "ollama:qwen3:8b"
+      input_token_budget: 12000
+  context:
+    mode: "off"
+    document_max_characters: 50000
+    semantic_max_characters: 20000
+    semantic_max_elements: 500
+    semantic_max_depth: 16
+    target_before_max_characters: 16000
+    target_after_max_characters: 8000
+    capture_timeout_seconds: 5
 
 hotkey:
   push_to_talk: "ctrl+alt+space"
