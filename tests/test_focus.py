@@ -6,6 +6,7 @@ import pytest
 
 from omnivoice.windows.focus import (
     MAX_SELECTED_TEXT_CHARACTERS,
+    ContextAnchor,
     FocusLease,
     FocusService,
     InvalidTargetError,
@@ -184,6 +185,10 @@ def test_focus_leases_match_all_identity_fields() -> None:
     assert not leases_match(lease, FocusLease((1, 2, 4), 10, 20, EDIT))
     assert not leases_match(lease, FocusLease((1, 2, 3), 11, 20, EDIT))
     assert not leases_match(lease, FocusLease((1, 2, 3), 10, 21, EDIT))
+    anchor = ContextAnchor(10, (1, 2, 3), (9,), 90, None)
+    anchored = FocusLease((1, 2, 3), 10, 20, EDIT, anchor)
+    assert leases_match(anchored, FocusLease((1, 2, 3), 10, 20, EDIT, anchor))
+    assert not leases_match(anchored, lease)
 
 
 def test_capture_accepts_missing_native_window_handle(
@@ -262,6 +267,25 @@ def test_capture_accepts_writable_document() -> None:
     lease = FocusService._capture(FakeAutomation(document), MODULE)
 
     assert lease.control_type == DOCUMENT
+
+
+def test_capture_adds_document_and_top_level_context_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = FakeElement(EDIT, (1,), native_window_handle=None)
+    document = FakeElement(DOCUMENT, (2,), has_focus=False, native_window_handle=None)
+    window = FakeElement(50033, (3,), has_focus=False, native_window_handle=90)
+    monkeypatch.setattr(FocusService, "_is_writable", staticmethod(lambda *_: True))
+
+    lease = FocusService._capture(
+        FakeAutomation(target, {target: document, document: window}), MODULE
+    )
+
+    assert lease.context_anchor is not None
+    assert lease.context_anchor.target_runtime_id == (1,)
+    assert lease.context_anchor.document_runtime_id == (2,)
+    assert lease.context_anchor.top_level_runtime_id == (3,)
+    assert lease.context_anchor.top_level_window_handle == 90
 
 
 def test_capture_rejects_read_only_document() -> None:

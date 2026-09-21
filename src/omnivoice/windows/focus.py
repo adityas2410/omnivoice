@@ -25,6 +25,17 @@ class InvalidTargetError(FocusError):
 
 
 @dataclass(frozen=True, slots=True)
+class ContextAnchor:
+    """Identify the request target and its containing window without COM objects."""
+
+    process_id: int
+    target_runtime_id: tuple[int, ...]
+    top_level_runtime_id: tuple[int, ...]
+    top_level_window_handle: int | None
+    document_runtime_id: tuple[int, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
 class FocusLease:
     """Carry only comparable UIA identity data outside the owning COM thread."""
 
@@ -34,6 +45,7 @@ class FocusLease:
     # The runtime ID and process ID remain the primary request-local identity.
     native_window_handle: int | None
     control_type: int
+    context_anchor: ContextAnchor | None = None
 
 
 MAX_SELECTED_TEXT_CHARACTERS = 4_000
@@ -68,6 +80,7 @@ class _Command:
     future: Future[Any]
     lease: FocusLease | None = None
     selection: SelectionContext | None = None
+    include_context: bool = False
 
 
 @dataclass(slots=True)
@@ -86,6 +99,7 @@ def leases_match(left: FocusLease, right: FocusLease) -> bool:
         and left.process_id == right.process_id
         and left.native_window_handle == right.native_window_handle
         and left.control_type == right.control_type
+        and left.context_anchor == right.context_anchor
     )
 
 
@@ -119,10 +133,10 @@ class FocusService:
             self._thread = None
             raise FocusError(f"Could not start Windows UI Automation: {error}") from error
 
-    async def capture(self) -> FocusLease:
+    async def capture(self, *, include_context: bool = False) -> FocusLease:
         """Capture and validate the control holding keyboard focus."""
 
-        return await self._submit("capture")
+        return await self._submit("capture", include_context=include_context)
 
     async def matches(self, lease: FocusLease) -> bool:
         """Compare the focused editable control with an existing lease."""
@@ -166,13 +180,16 @@ class FocusService:
         operation: Operation,
         lease: FocusLease | None = None,
         selection: SelectionContext | None = None,
+        include_context: bool = False,
     ) -> Any:
         """Bridge an asyncio caller to the blocking COM worker."""
 
         if self._thread is None or not self._thread.is_alive():
             raise FocusError("Focus service is not running")
         future: Future[Any] = Future()
-        self._commands.put(_Command(operation, future, lease, selection))
+        self._commands.put(
+            _Command(operation, future, lease, selection, include_context)
+        )
         return await asyncio.wrap_future(future)
 
     def _run(self) -> None:
@@ -223,7 +240,11 @@ class FocusService:
                 if command is not None:
                     try:
                         if command.operation == "capture":
-                            result = self._capture(automation, module)
+                            result = self._capture(
+                                automation,
+                                module,
+                                include_context=command.include_context,
+                            )
                         elif command.operation == "matches":
                             result = self._matches_current(automation, module, command.lease)
                         elif command.operation == "watch":
@@ -297,10 +318,18 @@ class FocusService:
         if lease is None:
             return False
         try:
-            current = FocusService._capture(automation, module)
+            # The context worker independently verifies the window anchor. Rewalking
+            # the full ancestor chain here would put cross-process tree calls in the
+            # per-character guarded-typing path.
+            current = FocusService._capture(automation, module, include_context=False)
         except InvalidTargetError:
             return False
-        return leases_match(current, lease)
+        return (
+            current.runtime_id == lease.runtime_id
+            and current.process_id == lease.process_id
+            and current.native_window_handle == lease.native_window_handle
+            and current.control_type == lease.control_type
+        )
 
     @staticmethod
     def _capture_selection(
@@ -389,7 +418,9 @@ class FocusService:
             return False
 
     @staticmethod
-    def _capture(automation: Any, module: Any) -> FocusLease:
+    def _capture(
+        automation: Any, module: Any, *, include_context: bool = True
+    ) -> FocusLease:
         """Build a lease only for a supported control proven to be writable."""
 
         try:
@@ -421,15 +452,24 @@ class FocusService:
             )
             if not runtime_id:
                 raise InvalidTargetError("The focused control has no stable runtime identifier")
+            process_id = FocusService._required_int(
+                element.CurrentProcessId, "process identifier"
+            )
+            context_anchor = (
+                FocusService._capture_context_anchor(
+                    automation, module, element, runtime_id, process_id
+                )
+                if include_context
+                else None
+            )
             return FocusLease(
                 runtime_id=runtime_id,
-                process_id=FocusService._required_int(
-                    element.CurrentProcessId, "process identifier"
-                ),
+                process_id=process_id,
                 native_window_handle=FocusService._optional_int(
                     element.CurrentNativeWindowHandle
                 ),
                 control_type=control_type,
+                context_anchor=context_anchor,
             )
         except InvalidTargetError:
             raise
@@ -448,6 +488,58 @@ class FocusService:
         if not bool(focused.CurrentHasKeyboardFocus):
             raise InvalidTargetError("The focused control did not confirm keyboard focus")
         return FocusService._resolve_target(automation, module, focused)
+
+    @staticmethod
+    def _capture_context_anchor(
+        automation: Any,
+        module: Any,
+        target: Any,
+        target_runtime_id: tuple[int, ...],
+        process_id: int,
+    ) -> ContextAnchor:
+        """Walk only ancestors to identify the containing document and top window."""
+
+        document_type = FocusService._required_int(
+            module.UIA_DocumentControlTypeId, "Document control type"
+        )
+        element = target
+        top_level = target
+        document_runtime_id: tuple[int, ...] | None = None
+        walker = automation.RawViewWalker
+        for _ in range(64):
+            element_type = FocusService._required_int(
+                element.CurrentControlType, "ancestor control type"
+            )
+            if document_runtime_id is None and element_type == document_type:
+                raw_document_id = element.GetRuntimeId()
+                if raw_document_id:
+                    document_runtime_id = tuple(int(part) for part in raw_document_id)
+            top_level = element
+            parent = walker.GetParentElement(element)
+            if not parent:
+                break
+            try:
+                parent_process = FocusService._required_int(
+                    parent.CurrentProcessId, "ancestor process identifier"
+                )
+            except FocusError:
+                break
+            if parent_process != process_id:
+                break
+            element = parent
+
+        raw_top_level_id = top_level.GetRuntimeId()
+        if not raw_top_level_id:
+            raise InvalidTargetError("The containing window has no runtime identifier")
+        return ContextAnchor(
+            process_id=process_id,
+            target_runtime_id=target_runtime_id,
+            top_level_runtime_id=tuple(int(part) for part in raw_top_level_id),
+            top_level_window_handle=FocusService._optional_int(
+                top_level.CurrentNativeWindowHandle
+            ),
+            document_runtime_id=document_runtime_id,
+        )
 
     @staticmethod
     def _resolve_target(automation: Any, module: Any, focused: Any) -> Any:

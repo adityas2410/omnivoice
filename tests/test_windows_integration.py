@@ -5,8 +5,10 @@ import tkinter as tk
 
 import pytest
 
+from omnivoice.context import ContextCaptureLimits
 from omnivoice.speech.audio import list_input_devices
 from omnivoice.windows.focus import FocusLease, FocusService, InvalidTargetError
+from omnivoice.windows.context import UIContextService
 from omnivoice.windows.hotkey import GlobalHotkey, parse_hotkey
 from omnivoice.windows.keyboard import KeyboardExecutor, WindowsInputBackend
 from omnivoice.windows.speech import WindowsSapiTTS
@@ -68,7 +70,19 @@ async def test_sapi_initializes_and_closes_without_speaking() -> None:
 @pytest.mark.asyncio
 async def test_guarded_typing_into_owned_edit_control() -> None:
     service = FocusService(lambda _: None)
+    context_service = UIContextService(
+        ContextCaptureLimits(
+            document_max_characters=50_000,
+            semantic_max_characters=20_000,
+            semantic_max_elements=500,
+            semantic_max_depth=16,
+            target_before_max_characters=16_000,
+            target_after_max_characters=8_000,
+            capture_timeout_seconds=5,
+        )
+    )
     service.start()
+    context_service.start()
     root = tk.Tk()
     root.title("OmniVoice integration test")
     root.geometry("360x100")
@@ -93,17 +107,20 @@ async def test_guarded_typing_into_owned_edit_control() -> None:
     try:
         await asyncio.sleep(0.05)
         try:
-            lease = await service.capture()
+            lease = await service.capture(include_context=True)
         except InvalidTargetError as exc:
             if "off-screen" in str(exc):
                 pytest.skip("the test host has no visible interactive desktop")
             raise
         assert await service.watch(lease)
+        captured = await context_service.capture(lease, asyncio.Event())
+        assert captured.ui_context.status in {"complete", "partial"}
         executor = KeyboardExecutor(WindowsInputBackend())
         await executor.type_text("Ω", lambda: service.matches(lease), asyncio.Event())
         root.update()
         assert entry.get() == "Ω"
     finally:
+        await context_service.stop()
         await service.stop()
         pumping = False
         await pump_task
