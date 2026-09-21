@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from omnivoice.cli import Console
+from omnivoice.context import ContextCaptureLimits
 from omnivoice.config import (
     ConfigError,
     default_config_path,
@@ -29,6 +30,7 @@ from omnivoice.speech.setup import (
 )
 from omnivoice.speech.whisper_cpp import WhisperCppSTT
 from omnivoice.windows.focus import FocusError, FocusLease, FocusService
+from omnivoice.windows.context import ContextError, UIContextService
 from omnivoice.windows.hotkey import GlobalHotkey, HotkeyError, parse_hotkey
 from omnivoice.windows.keyboard import KeyboardExecutor, WindowsInputBackend
 from omnivoice.windows.speech import DisabledTTS, WindowsReadyCue, WindowsSapiTTS
@@ -124,6 +126,9 @@ async def run(args: argparse.Namespace) -> int:
             loop.call_soon_threadsafe(controller.focus_lost, lease)
 
     focus = FocusService(on_focus_lost)
+    context_service = UIContextService(
+        ContextCaptureLimits.from_config(config.agent.context)
+    )
     keyboard = KeyboardExecutor(WindowsInputBackend())
     stt = None
     recorder = None
@@ -168,6 +173,8 @@ async def run(args: argparse.Namespace) -> int:
         ready_cue=WindowsReadyCue(),
         planner=planner,
         models=models,
+        context_service=context_service,
+        context_enabled=config.agent.context.mode == "uia",
         minimum_recording_seconds=config.speech.recording.minimum_seconds,
         silence_rms_threshold=config.speech.recording.silence_rms_threshold,
         recording_limit_seconds=config.speech.recording.max_seconds,
@@ -232,6 +239,10 @@ async def run(args: argparse.Namespace) -> int:
         # enter the controller without its safety dependency being available.
         focus.start()
         try:
+            context_service.start()
+        except ContextError as exc:
+            console.status(f"UI context capture unavailable: {exc}")
+        try:
             await tts.start()
         except SpeechError as exc:
             console.status(f"Status speech unavailable: {exc}")
@@ -240,6 +251,10 @@ async def run(args: argparse.Namespace) -> int:
         console.status(f"Provider credentials: {default_credentials_path()}")
         console.status(f"Dictation hotkey: {dictation_spec.display_name}")
         console.status(f"Agent hotkey: {agent_spec.display_name}")
+        context_state = "enabled" if controller.context_enabled else "disabled"
+        console.status(
+            f"UI context: {context_state} (worker={context_service.health})."
+        )
         selection = models.snapshot()
         if selection is None:
             console.status("Agent model: not configured.")
@@ -262,6 +277,7 @@ async def run(args: argparse.Namespace) -> int:
         # Shutdown runs while the event loop is alive, allowing pending request
         # cancellation and COM commands to complete before their threads exit.
         await controller.shutdown()
+        await context_service.stop()
         if recorder is not None:
             await recorder.shutdown()
         if stt is not None:

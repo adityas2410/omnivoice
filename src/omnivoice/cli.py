@@ -16,6 +16,9 @@ HELP = """Commands:
   /status        Show hotkeys, model, request, speech, microphone, and self-test state
   /models        Show configured agent models
   /model NAME    Select an agent model for this session
+  /context       Show active-window context state
+  /context on    Enable UI context for this session
+  /context off   Disable UI context for this session
   /selftest arm  Permit one guarded dictation-hotkey test insertion for 30 seconds
   /cancel        Cancel the active request
   /quit          Shut down OmniVoice
@@ -55,6 +58,13 @@ class CommandDispatcher:
             self._status("Usage: /models")
         elif line == "/model" or line.startswith("/model "):
             self._select_model(line)
+        elif line == "/context":
+            state = "enabled" if self._controller.context_enabled else "disabled"
+            self._status(f"UI context is {state} for this session.")
+        elif line in {"/context on", "/context off"}:
+            self._controller.set_context_enabled(line.endswith(" on"))
+        elif line.startswith("/context"):
+            self._status("Usage: /context [on|off]")
         elif line == "/selftest arm":
             self._controller.arm_self_test()
         elif line == "/cancel":

@@ -17,6 +17,11 @@ from omnivoice.actions import (
     format_action_plan,
     validate_action_plan,
 )
+from omnivoice.context import (
+    CapturedContext,
+    ContextBoundaryChanged,
+    unavailable_context,
+)
 from omnivoice.models import ModelRegistry, ModelSelection
 from omnivoice.planning import PlanGenerationError
 from omnivoice.speech.ports import (
@@ -67,7 +72,7 @@ class RequestMode(StrEnum):
 class FocusPort(Protocol):
     """Describe only the focus operations needed by request orchestration."""
 
-    async def capture(self) -> FocusLease: ...
+    async def capture(self, *, include_context: bool = False) -> FocusLease: ...
 
     async def matches(self, lease: FocusLease) -> bool: ...
 
@@ -89,7 +94,23 @@ class ActionPlanPort(Protocol):
         selection: ModelSelection,
         cancelled: asyncio.Event,
         selected_text: str | None = None,
+        context: CapturedContext | None = None,
     ) -> ActionPlan: ...
+
+
+class ContextPort(Protocol):
+    """Describe the isolated read-only context operation used by agent requests."""
+
+    @property
+    def health(self) -> str: ...
+
+    async def capture(
+        self,
+        lease: FocusLease,
+        cancelled: asyncio.Event,
+        *,
+        selected_text: str | None = None,
+    ) -> CapturedContext: ...
 
 
 class _RequestCancelled(Exception):
@@ -115,6 +136,8 @@ class InteractionController:
         ready_cue: ReadyCue | None = None,
         planner: ActionPlanPort | None = None,
         models: ModelRegistry | None = None,
+        context_service: ContextPort | None = None,
+        context_enabled: bool = False,
         minimum_recording_seconds: float = 0.15,
         silence_rms_threshold: int = 80,
         recording_limit_seconds: float = 30.0,
@@ -128,6 +151,8 @@ class InteractionController:
         self._ready_cue = ready_cue
         self._planner = planner
         self._models = models
+        self._context_service = context_service
+        self._context_enabled = context_enabled
         self._minimum_recording_seconds = minimum_recording_seconds
         self._silence_rms_threshold = silence_rms_threshold
         self._recording_limit_seconds = recording_limit_seconds
@@ -163,10 +188,34 @@ class InteractionController:
         last = self.last_outcome.value if self.last_outcome is not None else "none"
         armed = "yes" if self.is_armed else "no"
         mode = self._active_mode.value if self._active_mode is not None else "none"
+        context = "enabled" if self._context_enabled else "disabled"
+        context_health = (
+            self._context_service.health if self._context_service is not None else "unavailable"
+        )
         return (
             f"state={self.state.value}, mode={mode}, self_test_armed={armed}, "
-            f"last_outcome={last}"
+            f"last_outcome={last}, context={context}, context_worker={context_health}"
         )
+
+    @property
+    def context_enabled(self) -> bool:
+        return self._context_enabled
+
+    def set_context_enabled(self, enabled: bool) -> bool:
+        """Change session-only context state when no request is active."""
+
+        if self.state is not RequestState.IDLE:
+            self._status(
+                f"Busy ({self.state.value}); UI context was not changed."
+            )
+            return False
+        self._context_enabled = enabled
+        state = "enabled" if enabled else "disabled"
+        health = (
+            self._context_service.health if self._context_service is not None else "unavailable"
+        )
+        self._status(f"UI context {state} for this session (worker={health}).")
+        return True
 
     def hotkey_pressed(self, mode: RequestMode = RequestMode.DICTATION) -> None:
         """Start press-time target binding or reject an overlapping request."""
@@ -188,7 +237,8 @@ class InteractionController:
         self._active_mode = mode
         self._set_state(RequestState.VALIDATING)
         self._request_task = asyncio.create_task(
-            self._run_request(mode, armed, selection), name="omnivoice-request"
+            self._run_request(mode, armed, selection, self._context_enabled),
+            name="omnivoice-request",
         )
 
     def hotkey_released(self, mode: RequestMode = RequestMode.DICTATION) -> None:
@@ -251,6 +301,7 @@ class InteractionController:
         mode: RequestMode,
         armed: bool,
         selection: ModelSelection | None,
+        context_enabled: bool,
     ) -> None:
         """Run one request mode against one immutable focus lease."""
 
@@ -264,7 +315,9 @@ class InteractionController:
                     "No agent model is configured. Add a model profile to config.yaml."
                 )
             self._status("Validating and binding the focused control...")
-            lease = await self._focus.capture()
+            lease = await self._focus.capture(
+                include_context=mode is RequestMode.AGENT and context_enabled
+            )
             self._active_lease = lease
             LOGGER.info(
                 "event=target_captured pid=%s hwnd=%s control_type=%s",
@@ -331,6 +384,25 @@ class InteractionController:
                     selection_context
                 ):
                     raise _RequestCancelled("Selected text changed. Request cancelled.")
+                captured_context: CapturedContext | None = None
+                if context_enabled:
+                    if not await self._focus.matches(lease):
+                        raise _RequestCancelled("Focus changed. Request cancelled.")
+                    self._set_state(RequestState.PROCESSING)
+                    self._status("Capturing bounded context from the active window...")
+                    captured_context = await self._capture_context(
+                        lease, selection_context
+                    )
+                    if self._cancelled.is_set() or not await self._focus.matches(lease):
+                        raise _RequestCancelled("Focus changed. Request cancelled.")
+                    if (
+                        selection_context is not None
+                        and not await self._focus.selection_matches(selection_context)
+                    ):
+                        raise _RequestCancelled(
+                            "Selected text changed. Request cancelled."
+                        )
+                    self._status(captured_context.metadata_summary())
                 self._set_state(RequestState.PROCESSING)
                 self._status(
                     f"Generating an action plan with {selection.alias} "
@@ -346,6 +418,7 @@ class InteractionController:
                             if selection_context is not None
                             else None
                         ),
+                        context=captured_context,
                     ),
                     has_selection=selection_context is not None,
                 )
@@ -438,6 +511,30 @@ class InteractionController:
             await self._safe_clear_watch()
             self._request_task = None
             self._set_state(RequestState.IDLE)
+
+    async def _capture_context(
+        self,
+        lease: FocusLease,
+        selection: SelectionContext | None,
+    ) -> CapturedContext:
+        service = self._context_service
+        if service is None:
+            return unavailable_context("worker_unavailable")
+        try:
+            return await service.capture(
+                lease,
+                self._cancelled,
+                selected_text=selection.text if selection is not None else None,
+            )
+        except ContextBoundaryChanged as exc:
+            raise _RequestCancelled("Window changed. Request cancelled.") from exc
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            LOGGER.info(
+                "event=context_capture_failed error_type=%s", type(exc).__name__
+            )
+            return unavailable_context("capture_failed")
 
     async def _run_self_test(self, lease: FocusLease) -> None:
         """Run the diagnostic marker without microphone or transcription use."""

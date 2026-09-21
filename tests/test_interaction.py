@@ -12,6 +12,12 @@ from omnivoice.actions import (
     ReplaceSelectionAction,
     ShortcutAction,
 )
+from omnivoice.context import (
+    CapturedContext,
+    ContextBoundaryChanged,
+    DocumentTextContext,
+    UIContext,
+)
 from omnivoice.config import AgentConfig
 from omnivoice.interaction import (
     SELF_TEST_TEXT,
@@ -37,8 +43,10 @@ class FakeFocus:
         self.selection_valid = True
         self.selection_checks = 0
         self.clears = 0
+        self.capture_context_flags: list[bool] = []
 
-    async def capture(self) -> FocusLease:
+    async def capture(self, *, include_context: bool = False) -> FocusLease:
+        self.capture_context_flags.append(include_context)
         return self.current
 
     async def matches(self, lease: FocusLease) -> bool:
@@ -179,6 +187,7 @@ class FakePlanner:
         self.wait_for_cancellation = False
         self.gate: asyncio.Event | None = None
         self.error: Exception | None = None
+        self.contexts: list[CapturedContext | None] = []
 
     async def generate(
         self,
@@ -186,7 +195,9 @@ class FakePlanner:
         selection: ModelSelection,
         cancelled: asyncio.Event,
         selected_text: str | None = None,
+        context: CapturedContext | None = None,
     ) -> ActionPlan:
+        self.contexts.append(context)
         self.calls.append((transcript, selection, selected_text))
         self.started.set()
         if self.wait_for_cancellation:
@@ -197,6 +208,33 @@ class FakePlanner:
         if self.error is not None:
             raise self.error
         return self.plan
+
+
+class FakeContext:
+    health = "ready"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[FocusLease, str | None]] = []
+        self.result = CapturedContext(
+            ui_context=UIContext(
+                status="partial",
+                document_text=DocumentTextContext(content="private page context"),
+            )
+        )
+        self.error: Exception | None = None
+
+    async def capture(
+        self,
+        lease: FocusLease,
+        cancelled: asyncio.Event,
+        *,
+        selected_text: str | None = None,
+    ) -> CapturedContext:
+        assert not cancelled.is_set()
+        self.calls.append((lease, selected_text))
+        if self.error is not None:
+            raise self.error
+        return self.result
 
 
 def configured_models() -> ModelRegistry:
@@ -238,6 +276,8 @@ def make_controller(
     statuses: list[str] | None = None,
     planner: FakePlanner | None = None,
     models: ModelRegistry | None = None,
+    context_service: FakeContext | None = None,
+    context_enabled: bool = False,
 ) -> tuple[InteractionController, FakeBackend, FakeRecorder, FakeSTT, FakeTTS]:
     actual_backend = backend or FakeBackend()
     actual_recorder = recorder or FakeRecorder(tmp_path / "recording.wav")
@@ -254,6 +294,8 @@ def make_controller(
         ready_cue=FakeCue(),
         planner=planner,
         models=models,
+        context_service=context_service,
+        context_enabled=context_enabled,
     )
     return controller, actual_backend, actual_recorder, actual_stt, actual_tts
 
@@ -418,6 +460,94 @@ async def test_literal_dictation_never_calls_action_planner(tmp_path: Path) -> N
 
     assert planner.calls == []
     assert controller.last_outcome is RequestState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_literal_dictation_never_captures_enabled_ui_context(tmp_path: Path) -> None:
+    context_service = FakeContext()
+    focus = FakeFocus()
+    controller, _, _, _, _ = make_controller(
+        tmp_path,
+        focus=focus,
+        context_service=context_service,
+        context_enabled=True,
+    )
+
+    controller.hotkey_pressed(RequestMode.DICTATION)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.DICTATION)
+    await wait_until_idle(controller)
+
+    assert context_service.calls == []
+    assert focus.capture_context_flags == [False]
+
+
+@pytest.mark.asyncio
+async def test_agent_captures_context_after_transcription_and_passes_typed_data(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    context_service = FakeContext()
+    focus = FakeFocus()
+    planner = FakePlanner(
+        ActionPlan(actions=(InsertTextAction(type="insert_text", text="reply"),))
+    )
+    statuses: list[str] = []
+    controller, _, _, _, _ = make_controller(
+        tmp_path,
+        planner=planner,
+        focus=focus,
+        models=configured_models(),
+        context_service=context_service,
+        context_enabled=True,
+        statuses=statuses,
+    )
+
+    with caplog.at_level(logging.INFO):
+        controller.hotkey_pressed(RequestMode.AGENT)
+        await wait_for_state(controller, RequestState.LISTENING)
+        controller.hotkey_released(RequestMode.AGENT)
+        await wait_until_idle(controller)
+
+    assert context_service.calls == [(LEASE, None)]
+    assert focus.capture_context_flags == [True]
+    assert planner.contexts == [context_service.result]
+    assert any("document=20 chars" in status for status in statuses)
+    assert "private page context" not in caplog.text
+
+
+def test_context_session_toggle_is_rejected_while_busy(tmp_path: Path) -> None:
+    statuses: list[str] = []
+    controller, _, _, _, _ = make_controller(tmp_path, statuses=statuses)
+    controller.state = RequestState.LISTENING
+
+    assert not controller.set_context_enabled(True)
+    assert not controller.context_enabled
+    assert statuses == ["Busy (listening); UI context was not changed."]
+
+
+@pytest.mark.asyncio
+async def test_window_change_during_context_capture_cancels_before_model(
+    tmp_path: Path,
+) -> None:
+    context_service = FakeContext()
+    context_service.error = ContextBoundaryChanged("private provider detail")
+    planner = FakePlanner()
+    controller, backend, _, _, _ = make_controller(
+        tmp_path,
+        planner=planner,
+        models=configured_models(),
+        context_service=context_service,
+        context_enabled=True,
+    )
+
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await wait_until_idle(controller)
+
+    assert planner.calls == []
+    assert backend.sent == []
+    assert controller.last_outcome is RequestState.CANCELLED
 
 
 @pytest.mark.asyncio

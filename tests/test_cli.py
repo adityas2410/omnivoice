@@ -11,6 +11,7 @@ class FakeController:
     state: RequestState = RequestState.IDLE
     armed: bool = False
     cancelled: bool = False
+    context_enabled: bool = False
 
     def describe_status(self) -> str:
         return f"state={self.state.value}"
@@ -20,6 +21,12 @@ class FakeController:
 
     def cancel(self, reason: str = "Request cancelled.") -> None:
         self.cancelled = True
+
+    def set_context_enabled(self, enabled: bool) -> bool:
+        if self.state is not RequestState.IDLE:
+            return False
+        self.context_enabled = enabled
+        return True
 
 
 def make_dispatcher(
@@ -57,6 +64,22 @@ def test_help_lists_model_commands() -> None:
     assert writes == [HELP]
     assert "/models" in HELP
     assert "/model NAME" in HELP
+    assert "/context on" in HELP
+
+
+def test_context_commands_are_session_only_and_validate_usage() -> None:
+    dispatcher, _, statuses, _ = make_dispatcher()
+
+    dispatcher.dispatch("/context")
+    dispatcher.dispatch("/context on")
+    dispatcher.dispatch("/context")
+    dispatcher.dispatch("/context maybe")
+
+    assert statuses == [
+        "UI context is disabled for this session.",
+        "UI context is enabled for this session.",
+        "Usage: /context [on|off]",
+    ]
 
 
 def test_models_lists_current_and_default_without_provider_access() -> None:

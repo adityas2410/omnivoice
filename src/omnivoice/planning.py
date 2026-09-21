@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from omnivoice.actions import (
     planner_instructions,
     validate_action_plan,
 )
+from omnivoice.context import CapturedContext
 from omnivoice.models import ModelSelection
 
 
@@ -116,6 +118,7 @@ class ActionPlanGenerator:
         selection: ModelSelection,
         cancelled: asyncio.Event,
         selected_text: str | None = None,
+        context: CapturedContext | None = None,
     ) -> ActionPlan:
         """Run one bounded request and discard any result arriving after cancellation."""
 
@@ -126,9 +129,11 @@ class ActionPlanGenerator:
         cancel_task: asyncio.Task[bool] | None = None
         try:
             handle = self._model_factory(selection)
-            request = json.dumps(
-                {"request": transcript, "selected_text": selected_text},
-                ensure_ascii=False,
+            request = _build_request(
+                transcript,
+                selected_text,
+                context,
+                selection.input_token_budget,
             )
             run_task = asyncio.create_task(
                 self._run(request, handle.model), name="omnivoice-model-request"
@@ -203,3 +208,125 @@ class ActionPlanGenerator:
             ),
         )
         return result.output
+
+
+def _estimated_tokens(value: str) -> int:
+    """Use one documented, deterministic estimate across Groq and Ollama."""
+
+    return math.ceil(len(value.encode("utf-8")) / 3)
+
+
+def _build_request(
+    transcript: str,
+    selected_text: str | None,
+    context: CapturedContext | None,
+    input_token_budget: int,
+) -> str:
+    """Serialize context and trim optional material before provider contact."""
+
+    payload: dict[str, Any] = {
+        "request": transcript,
+        "selected_text": selected_text,
+        "target_context": (
+            context.target_context.model_dump(mode="json")
+            if context is not None and context.target_context is not None
+            else None
+        ),
+        "ui_context": (
+            context.ui_context.model_dump(mode="json") if context is not None else None
+        ),
+    }
+    overhead = planner_instructions() + json.dumps(
+        ActionPlan.model_json_schema(), ensure_ascii=False
+    )
+
+    def serialize() -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    def estimate() -> int:
+        return _estimated_tokens(overhead + serialize())
+
+    mandatory = {
+        "request": transcript,
+        "selected_text": selected_text,
+        "target_context": None,
+        "ui_context": None,
+    }
+    mandatory_text = json.dumps(mandatory, ensure_ascii=False, separators=(",", ":"))
+    if _estimated_tokens(overhead + mandatory_text) > input_token_budget:
+        raise PlanGenerationError(
+            "The spoken request and selected text exceed the selected model input budget."
+        )
+
+    while estimate() > input_token_budget:
+        ui_context = payload.get("ui_context")
+        outline = ui_context.get("semantic_outline") if isinstance(ui_context, dict) else None
+        items = outline.get("items") if isinstance(outline, dict) else None
+        if isinstance(items, list) and len(items) > 100:
+            del items[max(100, len(items) - max(1, len(items) // 4)) :]
+            outline["truncated"] = True
+            continue
+
+        document = ui_context.get("document_text") if isinstance(ui_context, dict) else None
+        content = document.get("content") if isinstance(document, dict) else None
+        if isinstance(content, str) and len(content) > 12_000:
+            document["content"] = _preserve_edges(content, max(12_000, len(content) * 3 // 4))
+            document["truncated_before"] = True
+            document["truncated_after"] = True
+            continue
+
+        if isinstance(items, list) and items:
+            del items[max(0, len(items) - max(1, len(items) // 4)) :]
+            outline["truncated"] = True
+            if not items:
+                ui_context["semantic_outline"] = None
+                ui_context["status"] = "partial" if document else "unavailable"
+            continue
+
+        target = payload.get("target_context")
+        if isinstance(target, dict) and target.get("source") == "text_pattern":
+            before = str(target.get("before", ""))
+            after = str(target.get("after", ""))
+            if len(before) > 4_000 or len(after) > 2_000:
+                target["before"] = before[-max(4_000, len(before) * 3 // 4) :]
+                target["after"] = after[: max(2_000, len(after) * 3 // 4)]
+                target["truncated_before"] = True
+                target["truncated_after"] = True
+                continue
+        elif isinstance(target, dict) and target.get("source") == "value_pattern":
+            value = str(target.get("content", ""))
+            if len(value) > 6_000:
+                target["content"] = _preserve_edges(value, max(6_000, len(value) * 3 // 4))
+                target["truncated"] = True
+                continue
+
+        if isinstance(content, str) and content:
+            new_length = max(0, len(content) - max(1_000, len(content) // 4))
+            document["content"] = _preserve_edges(content, new_length)
+            document["truncated_before"] = True
+            document["truncated_after"] = True
+            if not document["content"]:
+                ui_context["document_text"] = None
+                ui_context["status"] = "unavailable"
+            continue
+
+        if target is not None:
+            payload["target_context"] = None
+            continue
+        raise PlanGenerationError(
+            "The request context exceeds the selected model input budget."
+        )
+    return serialize()
+
+
+def _preserve_edges(text: str, maximum: int) -> str:
+    if maximum <= 0:
+        return ""
+    if len(text) <= maximum:
+        return text
+    marker = "\n[context omitted]\n"
+    available = maximum - len(marker)
+    if available <= 0:
+        return text[:maximum]
+    head = available * 4 // 5
+    return text[:head] + marker + text[-(available - head) :]
