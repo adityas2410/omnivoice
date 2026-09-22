@@ -6,6 +6,7 @@ import pytest
 import pydantic_ai
 from pydantic_ai import ModelProfile
 from pydantic_ai import models as pydantic_models
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.groq import GroqModel
@@ -308,6 +309,40 @@ async def test_provider_constructor_failure_is_sanitized() -> None:
         )
 
     assert "private" not in error.value.user_message
+
+
+@pytest.mark.asyncio
+async def test_provider_http_failure_reports_safe_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fail(selection: ModelSelection) -> ModelHandle:
+        del selection
+        raise ModelHTTPError(
+            429,
+            "test-model",
+            {"error": {"code": "rate_limit", "message": "private provider detail"}},
+            headers={"x-request-id": "req-123"},
+        )
+
+    generator = ActionPlanGenerator(fail)
+
+    with caplog.at_level("INFO"), pytest.raises(
+        PlanGenerationError, match="rate limited"
+    ) as error:
+        await generator.generate(
+            "private transcript",
+            ModelSelection("test", "groq:test"),
+            asyncio.Event(),
+        )
+
+    assert "HTTP 429" in error.value.user_message
+    assert "code rate_limit" in error.value.user_message
+    assert "request ID req-123" in error.value.user_message
+    assert "status_code=429" in caplog.text
+    assert "provider_code=rate_limit" in caplog.text
+    assert "request_id=req-123" in caplog.text
+    assert "private provider detail" not in error.value.user_message
+    assert "private provider detail" not in caplog.text
 
 
 @pytest.mark.asyncio

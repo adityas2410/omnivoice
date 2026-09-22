@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -14,7 +16,12 @@ from groq import AsyncGroq
 from openai import AsyncOpenAI
 import pydantic_ai
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai.exceptions import (
+    ModelAPIError,
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.output import NativeOutput
@@ -38,6 +45,8 @@ MODEL_REQUEST_TIMEOUT_SECONDS = 20.0
 PLAN_DEADLINE_SECONDS = 30.0
 MAX_OUTPUT_TOKENS = 1_024
 OLLAMA_LOCAL_BASE_URL = "http://localhost:11434/v1"
+LOGGER = logging.getLogger(__name__)
+_SAFE_PROVIDER_VALUE = re.compile(r"[A-Za-z0-9._:/-]{1,128}\Z")
 
 # OmniVoice owns its interactive terminal.  Pydantic AI otherwise prints a
 # first-run promotional banner (including ANSI escapes on some Windows
@@ -51,6 +60,101 @@ class PlanGenerationError(RuntimeError):
     def __init__(self, user_message: str) -> None:
         super().__init__(user_message)
         self.user_message = user_message
+
+
+def _safe_provider_value(value: object) -> str | None:
+    """Keep provider metadata bounded and free of arbitrary response text."""
+
+    if not isinstance(value, str) or not _SAFE_PROVIDER_VALUE.fullmatch(value):
+        return None
+    return value
+
+
+def _provider_error_code(body: object) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if isinstance(error, dict):
+        return _safe_provider_value(error.get("code"))
+    return _safe_provider_value(body.get("code"))
+
+
+def _provider_request_id(headers: dict[str, str] | None) -> str | None:
+    if not headers:
+        return None
+    for name in ("x-request-id", "x-groq-request-id", "request-id"):
+        value = _safe_provider_value(headers.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def _http_failure_category(status_code: int) -> str:
+    if status_code == 400:
+        return "invalid request"
+    if status_code == 401:
+        return "authentication rejected"
+    if status_code == 403:
+        return "permission denied"
+    if status_code == 404:
+        return "model or endpoint not found"
+    if status_code == 408:
+        return "provider timeout"
+    if status_code == 413:
+        return "request too large"
+    if status_code == 422:
+        return "request rejected"
+    if status_code == 429:
+        return "rate limited"
+    if status_code >= 500:
+        return "provider unavailable"
+    return "HTTP error"
+
+
+def _provider_failure(
+    selection: ModelSelection, exc: BaseException
+) -> PlanGenerationError:
+    """Create useful diagnostics without exposing provider response bodies."""
+
+    provider = selection.selector.partition(":")[0]
+    display_name = "Groq" if provider == "groq" else "Local Ollama"
+    if isinstance(exc, ModelHTTPError):
+        category = _http_failure_category(exc.status_code)
+        provider_code = _provider_error_code(exc.body)
+        request_id = _provider_request_id(exc.headers)
+        LOGGER.info(
+            "event=model_provider_failed provider=%s category=http "
+            "status_code=%s provider_code=%s request_id=%s",
+            provider,
+            exc.status_code,
+            provider_code or "none",
+            request_id or "none",
+        )
+        details = [f"HTTP {exc.status_code}"]
+        if provider_code is not None:
+            details.append(f"code {provider_code}")
+        if request_id is not None:
+            details.append(f"request ID {request_id}")
+        return PlanGenerationError(
+            f"{display_name} request failed: {category} ({', '.join(details)})."
+        )
+    if isinstance(exc, ModelAPIError):
+        LOGGER.info(
+            "event=model_provider_failed provider=%s category=connection error_type=%s",
+            provider,
+            type(exc).__name__,
+        )
+        return PlanGenerationError(
+            f"{display_name} connection failed before a valid HTTP response was received."
+        )
+    LOGGER.info(
+        "event=model_provider_failed provider=%s category=unexpected error_type=%s",
+        provider,
+        type(exc).__name__,
+    )
+    return PlanGenerationError(
+        f"{display_name} request failed due to an unexpected provider error."
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,14 +273,7 @@ class ActionPlanGenerator:
                 "The model did not return a valid action plan."
             ) from exc
         except BaseException as exc:
-            if selection.selector.startswith("ollama:"):
-                message = (
-                    "Local Ollama request failed. Ensure Ollama is running and the "
-                    "selected model is installed."
-                )
-            else:
-                message = "Groq request failed. Check the model, network, and API quota."
-            raise PlanGenerationError(message) from exc
+            raise _provider_failure(selection, exc) from exc
         finally:
             for task in (run_task, cancel_task):
                 if task is not None and not task.done():
