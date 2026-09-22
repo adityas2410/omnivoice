@@ -19,6 +19,8 @@ HELP = """Commands:
   /context       Show active-window context state
   /context on    Enable UI context for this session
   /context off   Disable UI context for this session
+  /context inspect  Show the last captured context as JSON
+  /context clear    Forget the last captured context
   /selftest arm  Permit one guarded dictation-hotkey test insertion for 30 seconds
   /cancel        Cancel the active request
   /quit          Shut down OmniVoice
@@ -63,8 +65,13 @@ class CommandDispatcher:
             self._status(f"UI context is {state} for this session.")
         elif line in {"/context on", "/context off"}:
             self._controller.set_context_enabled(line.endswith(" on"))
+        elif line == "/context inspect":
+            self._inspect_context()
+        elif line == "/context clear":
+            self._controller.clear_context_inspection()
+            self._status("Last captured UI context cleared.")
         elif line.startswith("/context"):
-            self._status("Usage: /context [on|off]")
+            self._status("Usage: /context [on|off|inspect|clear]")
         elif line == "/selftest arm":
             self._controller.arm_self_test()
         elif line == "/cancel":
@@ -78,6 +85,21 @@ class CommandDispatcher:
         else:
             self._status("Only slash commands are accepted. Use /help.")
         return True
+
+    def _inspect_context(self) -> None:
+        if self._controller.state is not RequestState.IDLE:
+            self._status(
+                f"Busy ({self._controller.state.value}); UI context inspection is unavailable."
+            )
+            return
+        snapshot = self._controller.last_context_inspection
+        if snapshot is None:
+            self._status("No captured UI context is available for inspection.")
+            return
+        self._write(
+            "Last captured UI context (session memory; captured before model-budget trimming):\n"
+            f"{snapshot}\n"
+        )
 
     def _show_models(self) -> None:
         configured = self._models.configured

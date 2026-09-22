@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from enum import StrEnum
@@ -153,6 +154,7 @@ class InteractionController:
         self._models = models
         self._context_service = context_service
         self._context_enabled = context_enabled
+        self._last_context_inspection: str | None = None
         self._minimum_recording_seconds = minimum_recording_seconds
         self._silence_rms_threshold = silence_rms_threshold
         self._recording_limit_seconds = recording_limit_seconds
@@ -200,6 +202,17 @@ class InteractionController:
     @property
     def context_enabled(self) -> bool:
         return self._context_enabled
+
+    @property
+    def last_context_inspection(self) -> str | None:
+        """Return the last capture as explicit diagnostic JSON, if one exists."""
+
+        return self._last_context_inspection
+
+    def clear_context_inspection(self) -> None:
+        """Forget the session-memory diagnostic snapshot."""
+
+        self._last_context_inspection = None
 
     def set_context_enabled(self, enabled: bool) -> bool:
         """Change session-only context state when no request is active."""
@@ -386,6 +399,7 @@ class InteractionController:
                     raise _RequestCancelled("Selected text changed. Request cancelled.")
                 captured_context: CapturedContext | None = None
                 if context_enabled:
+                    self._last_context_inspection = None
                     if not await self._focus.matches(lease):
                         raise _RequestCancelled("Focus changed. Request cancelled.")
                     self._set_state(RequestState.PROCESSING)
@@ -402,6 +416,25 @@ class InteractionController:
                         raise _RequestCancelled(
                             "Selected text changed. Request cancelled."
                         )
+                    self._last_context_inspection = json.dumps(
+                        {
+                            "selected_text": (
+                                selection_context.text
+                                if selection_context is not None
+                                else None
+                            ),
+                            "target_context": (
+                                captured_context.target_context.model_dump(mode="json")
+                                if captured_context.target_context is not None
+                                else None
+                            ),
+                            "ui_context": captured_context.ui_context.model_dump(
+                                mode="json"
+                            ),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
                     self._status(captured_context.metadata_summary())
                 self._set_state(RequestState.PROCESSING)
                 self._status(

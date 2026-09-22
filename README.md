@@ -191,6 +191,8 @@ Authorization is one-shot and is consumed by the attempt, including a rejected o
 /context       Show active-window UI context state
 /context on    Enable UI context for this session
 /context off   Disable UI context for this session
+/context inspect  Show the last captured context as formatted JSON
+/context clear    Forget the last captured context
 /selftest arm  Permit one guarded dictation-hotkey insertion for 30 seconds
 /cancel        Cancel recording, transcription, processing, or typing
 /quit          Shut down and unregister all workers and Windows handlers
@@ -307,10 +309,14 @@ Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plu
 
 Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. Literal dictation contacts no LLM. The agent hotkey sends its transcript and, only when context is enabled, request-scoped selected text, target context, document text, and semantic UI structure to its snapshotted Groq or local Ollama model.
 
-Captured UI context exists only for the current request. It is not printed, logged,
-stored, added to future requests, or persisted as conversation history. Terminal
-messages expose only source availability, character counts, element counts, and
-truncation state.
+Captured UI context is not printed during normal requests, written to logs, added to
+future requests, or persisted to disk or conversation history. Terminal messages
+normally expose only source availability, character counts, element counts, and
+truncation state. For debugging, the most recent capture is retained only in process
+memory and can be displayed explicitly with `/context inspect`; `/context clear`
+forgets it immediately. The inspection is the raw capture before model-budget
+trimming, and it may contain sensitive selected text, document text, labels, and
+control descriptions.
 
 Operational logs contain provider and model names, timings, state changes, byte and character counts, control metadata, and error categories. They do not contain credentials, audio, transcript text, prompts, model responses, generated text, spoken status content, focused-control contents, subprocess output, or temporary filenames.
 

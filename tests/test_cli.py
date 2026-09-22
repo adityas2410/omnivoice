@@ -12,6 +12,7 @@ class FakeController:
     armed: bool = False
     cancelled: bool = False
     context_enabled: bool = False
+    last_context_inspection: str | None = None
 
     def describe_status(self) -> str:
         return f"state={self.state.value}"
@@ -27,6 +28,9 @@ class FakeController:
             return False
         self.context_enabled = enabled
         return True
+
+    def clear_context_inspection(self) -> None:
+        self.last_context_inspection = None
 
 
 def make_dispatcher(
@@ -65,6 +69,7 @@ def test_help_lists_model_commands() -> None:
     assert "/models" in HELP
     assert "/model NAME" in HELP
     assert "/context on" in HELP
+    assert "/context inspect" in HELP
 
 
 def test_context_commands_are_session_only_and_validate_usage() -> None:
@@ -78,8 +83,38 @@ def test_context_commands_are_session_only_and_validate_usage() -> None:
     assert statuses == [
         "UI context is disabled for this session.",
         "UI context is enabled for this session.",
-        "Usage: /context [on|off]",
+        "Usage: /context [on|off|inspect|clear]",
     ]
+
+
+def test_context_inspection_is_explicit_and_clearable() -> None:
+    dispatcher, _, statuses, writes = make_dispatcher()
+    controller = dispatcher._controller
+
+    dispatcher.dispatch("/context inspect")
+    controller.last_context_inspection = '{"document":"private"}'
+    dispatcher.dispatch("/context inspect")
+    dispatcher.dispatch("/context clear")
+    dispatcher.dispatch("/context inspect")
+
+    assert writes == [
+        "Last captured UI context (session memory; captured before model-budget trimming):\n"
+        '{"document":"private"}\n'
+    ]
+    assert statuses == [
+        "No captured UI context is available for inspection.",
+        "Last captured UI context cleared.",
+        "No captured UI context is available for inspection.",
+    ]
+
+
+def test_context_inspection_is_rejected_while_busy() -> None:
+    dispatcher, _, statuses, writes = make_dispatcher(state=RequestState.PROCESSING)
+
+    dispatcher.dispatch("/context inspect")
+
+    assert statuses == ["Busy (processing); UI context inspection is unavailable."]
+    assert writes == []
 
 
 def test_models_lists_current_and_default_without_provider_access() -> None:

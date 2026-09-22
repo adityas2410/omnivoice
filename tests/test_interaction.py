@@ -512,7 +512,13 @@ async def test_agent_captures_context_after_transcription_and_passes_typed_data(
     assert focus.capture_context_flags == [True]
     assert planner.contexts == [context_service.result]
     assert any("document=20 chars" in status for status in statuses)
+    assert controller.last_context_inspection is not None
+    assert '"selected_text": null' in controller.last_context_inspection
+    assert '"private page context"' in controller.last_context_inspection
     assert "private page context" not in caplog.text
+
+    controller.clear_context_inspection()
+    assert controller.last_context_inspection is None
 
 
 def test_context_session_toggle_is_rejected_while_busy(tmp_path: Path) -> None:
