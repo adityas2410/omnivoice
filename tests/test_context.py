@@ -107,6 +107,7 @@ MODULE = SimpleNamespace(
     UIA_EditControlTypeId=EDIT,
     UIA_TextControlTypeId=TEXT,
     UIA_ButtonControlTypeId=BUTTON,
+    HeadingLevel_None=80050,
 )
 
 
@@ -241,6 +242,40 @@ def test_semantic_outline_preserves_structure_and_filters_duplicates_and_passwor
     assert roles == ["document", "heading", "button", "edit"]
     assert context.items[-1].focused  # type: ignore[union-attr]
     assert all(item.name != "actual secret" for item in context.items)  # type: ignore[union-attr]
+
+
+def test_semantic_item_ignores_no_heading_and_unavailable_pattern_defaults() -> None:
+    element = FakeElement(TEXT, (7,), name="Plain text", heading=80050)
+    element.CurrentToggleState = 2
+    element.CurrentExpandCollapseState = 3
+    element.CurrentIsTogglePatternAvailable = False
+    element.CurrentIsExpandCollapsePatternAvailable = False
+    element.CurrentIsSelectionItemPatternAvailable = False
+
+    item = UIContextService._semantic_item(
+        element, MODULE, FocusLease((99,), 10, 20, EDIT), 2
+    )
+
+    assert item is not None
+    assert item.role == "text"
+    assert item.states == ()
+
+
+def test_semantic_item_keeps_states_only_for_available_patterns() -> None:
+    element = FakeElement(BUTTON, (8,), name="Disclosure", heading=80051)
+    element.CurrentIsTogglePatternAvailable = True
+    element.CurrentToggleState = 1
+    element.CurrentIsExpandCollapsePatternAvailable = True
+    element.CurrentExpandCollapseState = 1
+    element.CurrentIsSelectionItemPatternAvailable = False
+
+    item = UIContextService._semantic_item(
+        element, MODULE, FocusLease((99,), 10, 20, EDIT), 2
+    )
+
+    assert item is not None
+    assert item.role == "heading"
+    assert item.states == ("level=1", "checked", "expanded")
 
 
 def test_accumulator_returns_completed_sources_on_partial_timeout() -> None:

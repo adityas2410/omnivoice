@@ -667,26 +667,55 @@ class UIContextService:
         heading = UIContextService._int_property(
             element, module, "CurrentHeadingLevel", "UIA_HeadingLevelPropertyId"
         )
-        if heading and heading > 0:
-            states.append(f"level={heading}")
+        heading_level = UIContextService._heading_level(module, heading)
+        if heading_level is not None:
+            states.append(f"level={heading_level}")
             role = "heading"
         if UIContextService._bool_property(
+            element,
+            module,
+            "CurrentIsSelectionItemPatternAvailable",
+            "UIA_IsSelectionItemPatternAvailablePropertyId",
+        ) and UIContextService._bool_property(
             element, module, "CurrentIsSelected", "UIA_SelectionItemIsSelectedPropertyId"
         ):
             states.append("selected")
-        toggle = UIContextService._int_property(
-            element, module, "CurrentToggleState", "UIA_ToggleToggleStatePropertyId"
-        )
-        if toggle is not None:
-            states.append({0: "unchecked", 1: "checked", 2: "indeterminate"}.get(toggle, f"toggle={toggle}"))
-        expand = UIContextService._int_property(
+        if UIContextService._bool_property(
             element,
             module,
-            "CurrentExpandCollapseState",
-            "UIA_ExpandCollapseExpandCollapseStatePropertyId",
-        )
-        if expand is not None:
-            states.append({0: "collapsed", 1: "expanded", 2: "partially_expanded", 3: "leaf"}.get(expand, f"expand={expand}"))
+            "CurrentIsTogglePatternAvailable",
+            "UIA_IsTogglePatternAvailablePropertyId",
+        ):
+            toggle = UIContextService._int_property(
+                element, module, "CurrentToggleState", "UIA_ToggleToggleStatePropertyId"
+            )
+            if toggle is not None:
+                states.append(
+                    {0: "unchecked", 1: "checked", 2: "indeterminate"}.get(
+                        toggle, f"toggle={toggle}"
+                    )
+                )
+        if UIContextService._bool_property(
+            element,
+            module,
+            "CurrentIsExpandCollapsePatternAvailable",
+            "UIA_IsExpandCollapsePatternAvailablePropertyId",
+        ):
+            expand = UIContextService._int_property(
+                element,
+                module,
+                "CurrentExpandCollapseState",
+                "UIA_ExpandCollapseExpandCollapseStatePropertyId",
+            )
+            if expand is not None:
+                states.append(
+                    {
+                        0: "collapsed",
+                        1: "expanded",
+                        2: "partially_expanded",
+                        3: "leaf",
+                    }.get(expand, f"expand={expand}")
+                )
         focused = UIContextService._bool_property(
             element, module, "CurrentHasKeyboardFocus", "UIA_HasKeyboardFocusPropertyId"
         )
@@ -725,8 +754,11 @@ class UIContextService:
                 "UIA_HasKeyboardFocusPropertyId",
                 "UIA_IsPasswordPropertyId",
                 "UIA_SelectionItemIsSelectedPropertyId",
+                "UIA_IsSelectionItemPatternAvailablePropertyId",
                 "UIA_ToggleToggleStatePropertyId",
+                "UIA_IsTogglePatternAvailablePropertyId",
                 "UIA_ExpandCollapseExpandCollapseStatePropertyId",
+                "UIA_IsExpandCollapsePatternAvailablePropertyId",
                 "UIA_AriaRolePropertyId",
                 "UIA_AriaPropertiesPropertyId",
             ):
@@ -787,6 +819,22 @@ class UIContextService:
             if control_type == getattr(module, f"UIA_{suffix}ControlTypeId", object()):
                 return role
         return "custom"
+
+    @staticmethod
+    def _heading_level(module: Any, value: int | None) -> int | None:
+        """Normalize UIA's 8005x heading enum without treating None as a heading."""
+
+        if value is None:
+            return None
+        none_value = int(getattr(module, "HeadingLevel_None", 80050))
+        if value == none_value:
+            return None
+        if none_value < value <= none_value + 9:
+            return value - none_value
+        # Retain compatibility with providers and test doubles that expose 1-9.
+        if 1 <= value <= 9:
+            return value
+        return None
 
     @staticmethod
     def _bounded_property(element: Any, name: str, limit: int) -> str | None:
