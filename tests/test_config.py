@@ -184,8 +184,9 @@ def test_named_agent_models_load_in_yaml_order(tmp_path: Path) -> None:
     path.write_text(
         """
 agent:
-  default_model: groq-fast
+  default_model: gemini-flash
   models:
+    gemini-flash: gemini:gemini-3.8-flash
     groq-fast: groq:openai/gpt-oss-20b
     groq-large: groq:openai/gpt-oss-120b
     ollama-local: ollama:qwen3:8b
@@ -195,8 +196,14 @@ agent:
 
     config, _ = load_config(path)
 
-    assert config.agent.default_model == "groq-fast"
-    assert list(config.agent.models) == ["groq-fast", "groq-large", "ollama-local"]
+    assert config.agent.default_model == "gemini-flash"
+    assert list(config.agent.models) == [
+        "gemini-flash",
+        "groq-fast",
+        "groq-large",
+        "ollama-local",
+    ]
+    assert config.agent.models["gemini-flash"] == "gemini:gemini-3.8-flash"
     assert config.agent.models["ollama-local"] == "ollama:qwen3:8b"
 
 

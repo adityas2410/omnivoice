@@ -22,9 +22,11 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
+from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.output import NativeOutput
+from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.groq import GroqProvider
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.settings import ModelSettings
@@ -117,7 +119,11 @@ def _provider_failure(
     """Create useful diagnostics without exposing provider response bodies."""
 
     provider = selection.selector.partition(":")[0]
-    display_name = "Groq" if provider == "groq" else "Local Ollama"
+    display_name = {
+        "gemini": "Gemini",
+        "groq": "Groq",
+        "ollama": "Local Ollama",
+    }.get(provider, provider or "Model provider")
     if isinstance(exc, ModelHTTPError):
         category = _http_failure_category(exc.status_code)
         provider_code = _provider_error_code(exc.body)
@@ -169,6 +175,23 @@ def build_model(selection: ModelSelection) -> ModelHandle:
     """Lazily construct exactly the provider selected for this request."""
 
     provider_name, _, model_name = selection.selector.partition(":")
+    if provider_name == "gemini":
+        api_key = (
+            os.environ.get("GEMINI_API_KEY", "").strip()
+            or os.environ.get("GOOGLE_API_KEY", "").strip()
+        )
+        if not api_key:
+            raise PlanGenerationError(
+                "Gemini is not configured. Add GEMINI_API_KEY to the provider credentials file."
+            )
+        provider = GoogleProvider(api_key=api_key)
+        model = GoogleModel(model_name, provider=provider)
+
+        async def close_google() -> None:
+            await provider.client.aio.aclose()
+
+        return ModelHandle(model=model, close=close_google)
+
     if provider_name == "groq":
         api_key = os.environ.get("GROQ_API_KEY", "").strip()
         if not api_key:

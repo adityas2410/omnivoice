@@ -9,6 +9,7 @@ from pydantic_ai import models as pydantic_models
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.groq import GroqModel
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.test import TestModel
@@ -383,19 +384,51 @@ def test_missing_groq_key_fails_before_provider_request(
         build_model(ModelSelection("groq-fast", "groq:test-model"))
 
 
-@pytest.mark.asyncio
-async def test_provider_factory_builds_explicit_groq_and_local_ollama(
+def test_missing_gemini_key_fails_before_provider_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    with pytest.raises(PlanGenerationError, match="GEMINI_API_KEY"):
+        build_model(ModelSelection("gemini-flash", "gemini:gemini-3.8-flash"))
+
+
+@pytest.mark.asyncio
+async def test_provider_factory_builds_explicit_gemini_groq_and_local_ollama(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-secret-never-print")
     monkeypatch.setenv("GROQ_API_KEY", "test-secret-never-print")
+    gemini_handle = build_model(
+        ModelSelection("gemini-flash", "gemini:gemini-3.8-flash")
+    )
     groq_handle = build_model(ModelSelection("groq-fast", "groq:test-model"))
     ollama_handle = build_model(ModelSelection("local", "ollama:qwen3:8b"))
     try:
+        assert isinstance(gemini_handle.model, GoogleModel)
         assert isinstance(groq_handle.model, GroqModel)
         assert isinstance(ollama_handle.model, OllamaModel)
         assert ollama_handle.model.base_url.rstrip("/") == OLLAMA_LOCAL_BASE_URL
+        assert gemini_handle.model.model_name == "gemini-3.8-flash"
         assert groq_handle.model.model_name == "test-model"
         assert ollama_handle.model.model_name == "qwen3:8b"
     finally:
+        await gemini_handle.close()
         await groq_handle.close()
         await ollama_handle.close()
+
+
+@pytest.mark.asyncio
+async def test_gemini_factory_accepts_google_api_key_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-secret-never-print")
+    handle = build_model(
+        ModelSelection("gemini-flash", "gemini:gemini-3.8-flash")
+    )
+    try:
+        assert isinstance(handle.model, GoogleModel)
+    finally:
+        await handle.close()

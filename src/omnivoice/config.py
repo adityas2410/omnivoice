@@ -26,14 +26,15 @@ class ConfigError(RuntimeError):
 CONFIG_HEADER = """# OmniVoice configuration.
 # Add model profiles under agent.models as: alias: "provider:model-name"
 # Set agent.default_model to one of those aliases.
-# Provider mapping: groq:... uses GROQ_API_KEY; local ollama:... uses no key.
+# Provider mapping: gemini:... uses GEMINI_API_KEY, groq:... uses GROQ_API_KEY,
+# and local ollama:... uses no key.
 # API keys belong in %APPDATA%\\OmniVoice\\.env, never in this YAML file.
 
 """
 
 CREDENTIALS_TEMPLATE = """# OmniVoice provider credentials. Keep this file private.
 # Add only keys required by providers selected in config.yaml.
-# Example: a groq:... model reads GROQ_API_KEY from this file.
+# Examples: gemini:... reads GEMINI_API_KEY and groq:... reads GROQ_API_KEY.
 # Local ollama:... models need no API key.
 """
 
@@ -47,7 +48,7 @@ def _validate_model_selector(selector: str, alias: str) -> str:
     provider, separator, model_name = selector.partition(":")
     if not separator or not model_name:
         raise ValueError(f"model selector for {alias!r} must use '<provider>:<model>'")
-    if provider not in {"groq", "ollama"}:
+    if provider not in {"gemini", "groq", "ollama"}:
         raise ValueError(
             f"model selector for {alias!r} uses unsupported provider {provider!r}"
         )
