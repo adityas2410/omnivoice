@@ -159,11 +159,13 @@ Controls that expose only `ValuePattern` continue to support ordinary caret
 insertion but cannot use selection-aware transformation. OmniVoice does not use
 the clipboard, navigate with arrow keys, delete selections, or replace whole fields.
 
-Gemini requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), Groq requires
-`GROQ_API_KEY`, and local Ollama uses
-`http://localhost:11434/v1` without a key, but Ollama must be running and the
-selected model must already be installed. Models are never downloaded or probed
-by startup, `/models`, or `/model`.
+OmniVoice passes each configured `provider:model` selector to Pydantic AI. It
+does not contain a provider allowlist or a list of model IDs. Credentials and
+provider options use Pydantic AI's standard environment variables; for example,
+`GOOGLE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GROQ_API_KEY`.
+Local Ollama needs `OLLAMA_BASE_URL=http://localhost:11434/v1`, must be running,
+and must already contain the selected model. Models are never downloaded or
+probed by startup, `/models`, or `/model`.
 
 ## Terminal commands
 
@@ -249,8 +251,14 @@ agent:
   default_model: "gemini-flash"
   models:
     gemini-flash:
-      selector: "gemini:gemini-3.8-flash"
+      selector: "google:gemini-3.8-flash"
       input_token_budget: 1000000
+    claude:
+      selector: "anthropic:claude-sonnet-4-5"
+      input_token_budget: 200000
+    openai:
+      selector: "openai:gpt-5"
+      input_token_budget: 400000
     groq-fast:
       selector: "groq:openai/gpt-oss-20b"
       input_token_budget: 100000
@@ -262,21 +270,23 @@ agent:
 Agent models use named profiles so `/model NAME` can change the active model for
 the current process. `default_model` is restored whenever OmniVoice starts and
 must name an entry in `models`; runtime switching never rewrites the YAML file.
-`/models` only displays configured profiles and does not contact Gemini, Groq,
-or Ollama.
+`/models` only displays configured profiles and does not contact any provider.
 The original `alias: "provider:model"` form remains valid and uses a 48,000-token
 estimated input budget. Expanded profiles can set `input_token_budget` for the
 selected model. OmniVoice estimates request size deterministically from UTF-8 bytes,
 keeps the spoken request and selection intact, and trims duplicate semantic detail,
 distant document text, then distant caret context when necessary.
 OmniVoice also creates an instruction-only `%APPDATA%\OmniVoice\.env` and prints
-that path during startup. Model selectors determine credential lookup:
-`gemini:...` reads `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `groq:...` reads
-`GROQ_API_KEY`, while local `ollama:...` uses its
-OpenAI-compatible endpoint at `http://localhost:11434/v1` and needs no key. Add
-only the provider keys you use. A `.env` in the current working directory is
-also loaded for source-development workflows, and existing process environment
-variables take precedence.
+that path during startup. Pydantic AI's provider prefix determines credential
+lookup. Common selectors include `google:MODEL`, `anthropic:MODEL`,
+`openai:MODEL`, `groq:MODEL`, `openrouter:MODEL`, and `ollama:MODEL`. Put the
+provider's standard environment variables in `.env`; Google accepts
+`GOOGLE_API_KEY` (and the legacy `GEMINI_API_KEY`), while Ollama requires
+`OLLAMA_BASE_URL`. The authoritative prefix, model-name, and credential list is
+the [Pydantic AI model documentation](https://ai.pydantic.dev/models/overview/).
+OmniVoice deliberately does not duplicate that changing catalog in code. A
+`.env` in the current working directory is also loaded for source-development
+workflows, and existing process environment variables take precedence.
 An empty `agent` configuration remains valid while AI actions are unavailable.
 Selecting a configured profile changes only the current process. Provider
 credentials and model availability are checked only when the agent hotkey uses
