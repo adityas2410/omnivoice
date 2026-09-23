@@ -13,7 +13,7 @@ from omnivoice.models import ModelRegistry, ModelSelectionError
 
 HELP = """Commands:
   /help          Show this help
-  /status        Show hotkeys, model, request, speech, microphone, and self-test state
+  /status        Show hotkeys, model, request, speech, microphone, and context state
   /models        Show configured agent models
   /model NAME    Select an agent model for this session
   /context       Show active-window context state
@@ -21,7 +21,6 @@ HELP = """Commands:
   /context off   Disable UI context for this session
   /context inspect  Show the last captured context as JSON
   /context clear    Forget the last captured context
-  /selftest arm  Permit one guarded dictation-hotkey test insertion for 30 seconds
   /cancel        Cancel the active request
   /quit          Shut down OmniVoice
 """
@@ -72,14 +71,10 @@ class CommandDispatcher:
             self._status("Last captured UI context cleared.")
         elif line.startswith("/context"):
             self._status("Usage: /context [on|off|inspect|clear]")
-        elif line == "/selftest arm":
-            self._controller.arm_self_test()
         elif line == "/cancel":
             self._controller.cancel()
         elif line == "/quit":
             return False
-        elif line.startswith("/selftest"):
-            self._status("Usage: /selftest arm")
         elif line.startswith("/"):
             self._status(f"Unknown command: {line}. Use /help.")
         else:

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-import omnivoice.interaction as interaction
 from omnivoice.actions import (
     ActionPlan,
     InsertTextAction,
@@ -19,12 +18,7 @@ from omnivoice.context import (
     UIContext,
 )
 from omnivoice.config import AgentConfig
-from omnivoice.interaction import (
-    SELF_TEST_TEXT,
-    InteractionController,
-    RequestMode,
-    RequestState,
-)
+from omnivoice.interaction import InteractionController, RequestMode, RequestState
 from omnivoice.models import ModelRegistry, ModelSelection
 from omnivoice.planning import PlanGenerationError
 from omnivoice.speech.ports import Readiness, Recording, SpeechToTextError
@@ -320,26 +314,6 @@ async def test_direct_dictation_types_literal_transcript_and_cleans_audio(
 
 
 @pytest.mark.asyncio
-async def test_armed_self_test_bypasses_audio_and_stt(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(interaction, "SELF_TEST_PROCESSING_SECONDS", 0.0)
-    controller, backend, recorder, stt, _ = make_controller(tmp_path)
-
-    controller.arm_self_test()
-    controller.hotkey_pressed()
-    await wait_for_state(controller, RequestState.LISTENING)
-    controller.hotkey_released()
-    await wait_until_idle(controller)
-
-    assert controller.last_outcome is RequestState.COMPLETED
-    assert len(backend.sent) == len(SELF_TEST_TEXT)
-    assert not recorder.started
-    assert stt.calls == 0
-    assert not controller.is_armed
-
-
-@pytest.mark.asyncio
 async def test_release_before_target_ready_cancels(tmp_path: Path) -> None:
     statuses: list[str] = []
     controller, backend, _, _, _ = make_controller(tmp_path, statuses=statuses)
@@ -351,14 +325,6 @@ async def test_release_before_target_ready_cancels(tmp_path: Path) -> None:
     assert controller.last_outcome is RequestState.CANCELLED
     assert backend.sent == []
     assert any("before the target was ready" in status for status in statuses)
-
-
-def test_expired_arm_is_not_active(tmp_path: Path) -> None:
-    controller, *_ = make_controller(tmp_path)
-    controller.arm_self_test()
-    controller._armed_until = 0.0
-
-    assert not controller.is_armed
 
 
 @pytest.mark.asyncio
@@ -863,24 +829,6 @@ async def test_model_selection_is_snapshotted_when_agent_hotkey_starts(
     assert planner.calls[0][1] == ModelSelection(
         "groq-fast", "groq:openai/gpt-oss-20b"
     )
-
-
-@pytest.mark.asyncio
-async def test_agent_request_does_not_consume_dictation_self_test_arm(
-    tmp_path: Path,
-) -> None:
-    planner = FakePlanner(ActionPlan(actions=()))
-    controller, _, _, _, _ = make_controller(
-        tmp_path, planner=planner, models=configured_models()
-    )
-    controller.arm_self_test()
-
-    controller.hotkey_pressed(RequestMode.AGENT)
-    await wait_for_state(controller, RequestState.LISTENING)
-    controller.hotkey_released(RequestMode.AGENT)
-    await wait_until_idle(controller)
-
-    assert controller.is_armed
 
 
 @pytest.mark.asyncio

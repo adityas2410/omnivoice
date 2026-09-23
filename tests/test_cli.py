@@ -9,16 +9,12 @@ from omnivoice.models import ModelRegistry
 @dataclass
 class FakeController:
     state: RequestState = RequestState.IDLE
-    armed: bool = False
     cancelled: bool = False
     context_enabled: bool = False
     last_context_inspection: str | None = None
 
     def describe_status(self) -> str:
         return f"state={self.state.value}"
-
-    def arm_self_test(self) -> None:
-        self.armed = True
 
     def cancel(self, reason: str = "Request cancelled.") -> None:
         self.cancelled = True

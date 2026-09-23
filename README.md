@@ -165,28 +165,11 @@ Gemini requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), Groq requires
 selected model must already be installed. Models are never downloaded or probed
 by startup, `/models`, or `/model`.
 
-## Guarded self-test
-
-The fixed marker test bypasses the microphone and STT provider while exercising the same focus lease and guarded keyboard path:
-
-1. Enter `/selftest arm`.
-2. Within 30 seconds, focus a supported empty field.
-3. Hold `Ctrl+Alt+Space` until OmniVoice confirms that the target is bound, then release it.
-4. Keep focus unchanged for the two-second diagnostic delay.
-
-The test types:
-
-```text
-[OmniVoice safety test]
-```
-
-Authorization is one-shot and is consumed by the attempt, including a rejected or cancelled attempt.
-
 ## Terminal commands
 
 ```text
 /help          Show command help
-/status        Show both hotkeys, model, request, speech, microphone, and self-test state
+/status        Show both hotkeys, model, request, speech, microphone, and context state
 /models        Show agent models configured in YAML
 /model NAME    Select an agent model for this session
 /context       Show active-window UI context state
@@ -194,7 +177,6 @@ Authorization is one-shot and is consumed by the attempt, including a rejected o
 /context off   Disable UI context for this session
 /context inspect  Show the last captured context as formatted JSON
 /context clear    Forget the last captured context
-/selftest arm  Permit one guarded dictation-hotkey insertion for 30 seconds
 /cancel        Cancel recording, transcription, processing, or typing
 /quit          Shut down and unregister all workers and Windows handlers
 ```
@@ -307,7 +289,7 @@ different file.
 
 `threads: null` chooses a bounded value from the available CPU count. `device: null` uses the Windows default input. A device may instead be a numeric identifier or exact name from `omnivoice speech devices`. `executable_path` and `model_path` override the managed assets.
 
-STT and TTS can be disabled independently. With STT disabled or unavailable, the CLI and guarded self-test still run. If the configured SAPI voice is missing, OmniVoice warns and uses the Windows default voice. TTS failures never change a successful keyboard outcome.
+STT and TTS can be disabled independently. If the configured SAPI voice is missing, OmniVoice warns and uses the Windows default voice. TTS failures never change a successful keyboard outcome.
 
 Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plus exactly one letter, digit, function key, or supported named key. F12 is rejected because Windows reserves it for debugging. Dictation and agent chords must be different, including when their modifiers are written in a different order.
 

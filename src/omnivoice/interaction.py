@@ -1,11 +1,10 @@
-"""Focus-bound dictation, AI action, and self-test request orchestration."""
+"""Focus-bound dictation and AI action request orchestration."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import time
 from enum import StrEnum
 from typing import Callable, Protocol
 
@@ -44,11 +43,6 @@ from omnivoice.windows.keyboard import InputError, KeyboardExecutor
 
 
 LOGGER = logging.getLogger(__name__)
-SELF_TEST_TEXT = "[OmniVoice safety test]"
-SELF_TEST_ARM_SECONDS = 30.0
-SELF_TEST_PROCESSING_SECONDS = 2.0
-
-
 class RequestState(StrEnum):
     """Expose each externally meaningful stage of a hotkey request."""
 
@@ -160,7 +154,6 @@ class InteractionController:
         self._recording_limit_seconds = recording_limit_seconds
         self.state = RequestState.IDLE
         self.last_outcome: RequestState | None = None
-        self._armed_until = 0.0
         self._active_lease: FocusLease | None = None
         self._active_mode: RequestMode | None = None
         self._cancelled = asyncio.Event()
@@ -168,35 +161,18 @@ class InteractionController:
         self._request_task: asyncio.Task[None] | None = None
         self._shutting_down = False
 
-    @property
-    def is_armed(self) -> bool:
-        """Report whether one real self-test insertion is still authorized."""
-
-        return time.monotonic() < self._armed_until
-
-    def arm_self_test(self) -> None:
-        """Grant one time-limited authorization to emit the fixed marker."""
-
-        self._armed_until = time.monotonic() + SELF_TEST_ARM_SECONDS
-        self._status(
-            "Self-test armed for 30 seconds and one attempt. "
-            "Focus a supported text field, then hold and release the dictation hotkey."
-        )
-        LOGGER.info("event=self_test_armed expires_in_seconds=30")
-
     def describe_status(self) -> str:
         """Return request state without exposing focused, spoken, or typed text."""
 
         last = self.last_outcome.value if self.last_outcome is not None else "none"
-        armed = "yes" if self.is_armed else "no"
         mode = self._active_mode.value if self._active_mode is not None else "none"
         context = "enabled" if self._context_enabled else "disabled"
         context_health = (
             self._context_service.health if self._context_service is not None else "unavailable"
         )
         return (
-            f"state={self.state.value}, mode={mode}, self_test_armed={armed}, "
-            f"last_outcome={last}, context={context}, context_worker={context_health}"
+            f"state={self.state.value}, mode={mode}, last_outcome={last}, "
+            f"context={context}, context_worker={context_health}"
         )
 
     @property
@@ -241,7 +217,6 @@ class InteractionController:
             return
         self._cancelled = asyncio.Event()
         self._released = asyncio.Event()
-        armed = self._consume_arm() if mode is RequestMode.DICTATION else False
         selection = (
             self._models.snapshot()
             if mode is RequestMode.AGENT and self._models
@@ -250,12 +225,12 @@ class InteractionController:
         self._active_mode = mode
         self._set_state(RequestState.VALIDATING)
         self._request_task = asyncio.create_task(
-            self._run_request(mode, armed, selection, self._context_enabled),
+            self._run_request(mode, selection, self._context_enabled),
             name="omnivoice-request",
         )
 
     def hotkey_released(self, mode: RequestMode = RequestMode.DICTATION) -> None:
-        """Tell the active request to stop capture or continue the self-test."""
+        """Tell the active request to stop capture."""
 
         if (
             not self._shutting_down
@@ -303,16 +278,9 @@ class InteractionController:
                 await asyncio.gather(task, return_exceptions=True)
         await self._safe_clear_watch()
 
-    def _consume_arm(self) -> bool:
-        # Authorization is one-shot even when validation or execution fails.
-        armed = self.is_armed
-        self._armed_until = 0.0
-        return armed
-
     async def _run_request(
         self,
         mode: RequestMode,
-        armed: bool,
         selection: ModelSelection | None,
         context_enabled: bool,
     ) -> None:
@@ -346,10 +314,6 @@ class InteractionController:
                 raise _RequestCancelled("Focus changed. Request cancelled.")
             if mode is RequestMode.AGENT:
                 selection_context = await self._focus.capture_selection(lease)
-
-            if armed:
-                await self._run_self_test(lease)
-                return
 
             self._require_dictation_ready()
             await self._play_ready_cue()
@@ -467,8 +431,6 @@ class InteractionController:
             await self._speak("Done.")
         except InvalidTargetError as exc:
             message = f"Target unavailable: {exc}"
-            if armed:
-                message += " Self-test authorization was consumed; run /selftest arm again."
             self._status(message)
             LOGGER.info("event=target_unavailable reason=%s", type(exc).__name__)
             self._finish(RequestState.CANCELLED)
@@ -517,8 +479,6 @@ class InteractionController:
             await self._speak("Request failed.")
         except (FocusError, InputError) as exc:
             message = f"Request failed safely: {exc}"
-            if armed:
-                message += " Self-test authorization was consumed; run /selftest arm again."
             self._status(message)
             LOGGER.info("event=request_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
@@ -568,21 +528,6 @@ class InteractionController:
                 "event=context_capture_failed error_type=%s", type(exc).__name__
             )
             return unavailable_context("capture_failed")
-
-    async def _run_self_test(self, lease: FocusLease) -> None:
-        """Run the diagnostic marker without microphone or transcription use."""
-
-        self._set_state(RequestState.LISTENING)
-        self._status("Self-test target bound. Release the hotkey to continue.")
-        await self._wait_for_release_or_cancel()
-        self._set_state(RequestState.PROCESSING)
-        self._status("Target bound. Simulating two seconds of processing...")
-        if await self._wait_or_cancel(SELF_TEST_PROCESSING_SECONDS):
-            raise _RequestCancelled("Request cancelled.")
-        await self._execute_text(lease, SELF_TEST_TEXT)
-        self._status("Self-test completed.")
-        self._finish(RequestState.COMPLETED)
-        await self._speak("Done.")
 
     def _require_dictation_ready(self) -> None:
         if self._recorder is None or self._stt is None:
@@ -710,13 +655,6 @@ class InteractionController:
                     lambda: self._focus.matches(lease),
                     self._cancelled,
                 )
-
-    async def _wait_or_cancel(self, seconds: float) -> bool:
-        try:
-            await asyncio.wait_for(self._cancelled.wait(), timeout=seconds)
-            return True
-        except TimeoutError:
-            return False
 
     async def _stop_pending_speech(self) -> None:
         if self._tts is None:

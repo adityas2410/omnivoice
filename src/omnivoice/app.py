@@ -264,8 +264,7 @@ async def run(args: argparse.Namespace) -> int:
             )
         if stt is not None and not stt.readiness.ready:
             console.status(
-                "Local transcription is not ready. Run 'omnivoice speech setup'; "
-                "the guarded self-test remains available."
+                "Local transcription is not ready. Run 'omnivoice speech setup'."
             )
         await console.run(
             controller,
