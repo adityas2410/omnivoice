@@ -61,7 +61,7 @@ def test_existing_user_config_is_loaded(
     assert config.hotkey.push_to_talk == "f9"
 
 
-def test_legacy_generated_groq_config_uses_gemini_when_key_is_configured(
+def test_provider_keys_do_not_change_explicit_model_configuration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     app_data = tmp_path / "appdata"
@@ -71,82 +71,21 @@ def test_legacy_generated_groq_config_uses_gemini_when_key_is_configured(
     user_config.write_text(
         """
 agent:
-  default_model: groq-fast
+  default_model: local
   models:
-    groq-fast: groq:openai/gpt-oss-20b
-    groq-large: groq:openai/gpt-oss-120b
-    ollama-local: ollama:qwen3:8b
+    local: ollama:qwen3:8b
 """,
         encoding="utf-8",
     )
     monkeypatch.setenv("APPDATA", str(app_data))
     monkeypatch.setenv("GEMINI_API_KEY", "configured-secret")
+    monkeypatch.setenv("GROQ_API_KEY", "configured-secret")
 
     config, loaded = load_config()
 
     assert loaded == user_config
-    assert config.agent.default_model == "gemini-flash"
-    assert list(config.agent.models) == [
-        "gemini-flash",
-        "groq-fast",
-        "groq-large",
-        "ollama-local",
-    ]
-    profile = config.agent.models["gemini-flash"]
-    assert profile.selector == "gemini:gemini-3.8-flash"  # type: ignore[union-attr]
-    assert profile.input_token_budget == 1_000_000  # type: ignore[union-attr]
-
-
-def test_legacy_generated_groq_config_is_unchanged_without_gemini_key(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    app_data = tmp_path / "appdata"
-    user_directory = app_data / "OmniVoice"
-    user_directory.mkdir(parents=True)
-    (user_directory / "config.yaml").write_text(
-        """
-agent:
-  default_model: groq-fast
-  models:
-    groq-fast: groq:openai/gpt-oss-20b
-    groq-large: groq:openai/gpt-oss-120b
-    ollama-local: ollama:qwen3:8b
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("APPDATA", str(app_data))
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    config, _ = load_config()
-
-    assert config.agent.default_model == "groq-fast"
-    assert "gemini-flash" not in config.agent.models
-
-
-def test_custom_groq_config_is_not_implicitly_replaced(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    app_data = tmp_path / "appdata"
-    user_directory = app_data / "OmniVoice"
-    user_directory.mkdir(parents=True)
-    (user_directory / "config.yaml").write_text(
-        """
-agent:
-  default_model: groq-fast
-  models:
-    groq-fast: groq:openai/gpt-oss-20b
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("APPDATA", str(app_data))
-    monkeypatch.setenv("GEMINI_API_KEY", "configured-secret")
-
-    config, _ = load_config()
-
-    assert config.agent.default_model == "groq-fast"
-    assert "gemini-flash" not in config.agent.models
+    assert config.agent.default_model == "local"
+    assert config.agent.models == {"local": "ollama:qwen3:8b"}
 
 
 def test_user_credentials_file_is_loaded_without_overriding_environment(
