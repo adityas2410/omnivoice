@@ -12,6 +12,7 @@ build/
 dist/
 *.egg-info/
 .env
+config.yaml
 *.log
 CODEBASE_GUIDE.md
 IMPLEMENTATION_MILESTONES.md
