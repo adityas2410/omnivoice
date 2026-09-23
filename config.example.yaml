@@ -1,6 +1,9 @@
 agent:
-  default_model: "groq-fast"
+  default_model: "gemini-flash"
   models:
+    gemini-flash:
+      selector: "gemini:gemini-3.8-flash"
+      input_token_budget: 1000000
     groq-fast:
       selector: "groq:openai/gpt-oss-20b"
       input_token_budget: 100000

@@ -1,6 +1,6 @@
 # OmniVoice
 
-OmniVoice is a Windows-first voice-dictation and constrained AI-action CLI. It records English speech while a global push-to-talk hotkey is held and transcribes it locally with `whisper.cpp`. The dictation hotkey types the literal transcript, while the separate agent hotkey asks a configured Groq or local Ollama model for one validated keyboard-action plan. Both paths operate only while the original editable field still owns focus. Windows SAPI provides short fixed confirmations such as “Done.”
+OmniVoice is a Windows-first voice-dictation and constrained AI-action CLI. It records English speech while a global push-to-talk hotkey is held and transcribes it locally with `whisper.cpp`. The dictation hotkey types the literal transcript, while the separate agent hotkey asks a configured Gemini, Groq, or local Ollama model for one validated keyboard-action plan. Both paths operate only while the original editable field still owns focus. Windows SAPI provides short fixed confirmations such as “Done.”
 
 ## Safety model
 
@@ -159,7 +159,8 @@ Controls that expose only `ValuePattern` continue to support ordinary caret
 insertion but cannot use selection-aware transformation. OmniVoice does not use
 the clipboard, navigate with arrow keys, delete selections, or replace whole fields.
 
-Groq requires `GROQ_API_KEY`. Local Ollama uses
+Gemini requires `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), Groq requires
+`GROQ_API_KEY`, and local Ollama uses
 `http://localhost:11434/v1` without a key, but Ollama must be running and the
 selected model must already be installed. Models are never downloaded or probed
 by startup, `/models`, or `/model`.
@@ -263,8 +264,11 @@ example:
 
 ```yaml
 agent:
-  default_model: "groq-fast"
+  default_model: "gemini-flash"
   models:
+    gemini-flash:
+      selector: "gemini:gemini-3.8-flash"
+      input_token_budget: 1000000
     groq-fast:
       selector: "groq:openai/gpt-oss-20b"
       input_token_budget: 100000
@@ -276,7 +280,8 @@ agent:
 Agent models use named profiles so `/model NAME` can change the active model for
 the current process. `default_model` is restored whenever OmniVoice starts and
 must name an entry in `models`; runtime switching never rewrites the YAML file.
-`/models` only displays configured profiles and does not contact Groq or Ollama.
+`/models` only displays configured profiles and does not contact Gemini, Groq,
+or Ollama.
 The original `alias: "provider:model"` form remains valid and uses a 48,000-token
 estimated input budget. Expanded profiles can set `input_token_budget` for the
 selected model. OmniVoice estimates request size deterministically from UTF-8 bytes,
@@ -284,7 +289,8 @@ keeps the spoken request and selection intact, and trims duplicate semantic deta
 distant document text, then distant caret context when necessary.
 OmniVoice also creates an instruction-only `%APPDATA%\OmniVoice\.env` and prints
 that path during startup. Model selectors determine credential lookup:
-`groq:...` reads `GROQ_API_KEY`, while local `ollama:...` uses its
+`gemini:...` reads `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `groq:...` reads
+`GROQ_API_KEY`, while local `ollama:...` uses its
 OpenAI-compatible endpoint at `http://localhost:11434/v1` and needs no key. Add
 only the provider keys you use. A `.env` in the current working directory is
 also loaded for source-development workflows, and existing process environment
@@ -307,7 +313,7 @@ Supported hotkeys contain zero or more of `ctrl`, `alt`, `shift`, and `win`, plu
 
 ## Privacy and logs
 
-Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. Literal dictation contacts no LLM. The agent hotkey sends its transcript and, only when context is enabled, request-scoped selected text, target context, document text, and semantic UI structure to its snapshotted Groq or local Ollama model.
+Audio stays local and is sent only to the configured local `whisper.cpp` process. Each request uses a temporary WAV and transcript output; both are deleted after success, cancellation, timeout, or failure. Literal dictation contacts no LLM. The agent hotkey sends its transcript and, only when context is enabled, request-scoped selected text, target context, document text, and semantic UI structure to its snapshotted Gemini, Groq, or local Ollama model.
 
 Captured UI context is not printed during normal requests, written to logs, added to
 future requests, or persisted to disk or conversation history. Terminal messages
