@@ -18,13 +18,21 @@ agent:
       selector: "ollama:qwen3:8b"
       input_token_budget: 12000
   context:
+    # "off" disables UI context at startup; "uia" enables it persistently.
     mode: "off"
+    # Maximum characters of document/page text sent as context.
     document_max_characters: 50000
+    # Maximum serialized characters in the semantic UI Automation outline.
     semantic_max_characters: 20000
+    # Maximum UI Automation elements inspected for the semantic outline.
     semantic_max_elements: 500
+    # Maximum UI Automation hierarchy depth inspected.
     semantic_max_depth: 16
+    # Maximum document characters before the current caret or selection.
     target_before_max_characters: 16000
+    # Maximum document characters after the current caret or selection.
     target_after_max_characters: 8000
+    # Maximum seconds spent capturing UI context for one agent request.
     capture_timeout_seconds: 5
 
 hotkey:
