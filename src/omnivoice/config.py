@@ -40,6 +40,11 @@ CREDENTIALS_TEMPLATE = """# OmniVoice provider credentials. Keep this file priva
 
 
 DEFAULT_MODEL_INPUT_TOKEN_BUDGET = 48_000
+LEGACY_GENERATED_MODELS = {
+    "groq-fast": "groq:openai/gpt-oss-20b",
+    "groq-large": "groq:openai/gpt-oss-120b",
+    "ollama-local": "ollama:qwen3:8b",
+}
 
 
 def _validate_model_selector(selector: str, alias: str) -> str:
@@ -222,6 +227,33 @@ class OmniVoiceConfig(BaseModel):
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
 
 
+def _upgrade_legacy_generated_agent(config: OmniVoiceConfig) -> OmniVoiceConfig:
+    """Upgrade the old generated Groq template when Gemini is configured."""
+
+    gemini_key = (
+        os.environ.get("GEMINI_API_KEY", "").strip()
+        or os.environ.get("GOOGLE_API_KEY", "").strip()
+    )
+    if not gemini_key:
+        return config
+    if config.agent.default_model != "groq-fast":
+        return config
+    if config.agent.models != LEGACY_GENERATED_MODELS:
+        return config
+
+    models: dict[str, str | ModelProfileConfig] = {
+        "gemini-flash": ModelProfileConfig(
+            selector="gemini:gemini-3.8-flash",
+            input_token_budget=1_000_000,
+        ),
+        **config.agent.models,
+    }
+    agent = config.agent.model_copy(
+        update={"default_model": "gemini-flash", "models": models}
+    )
+    return config.model_copy(update={"agent": agent})
+
+
 def default_config_path() -> Path:
     """Return the per-user Windows configuration location."""
 
@@ -296,7 +328,10 @@ def load_config(explicit_path: Path | None = None) -> tuple[OmniVoiceConfig, Pat
         raise ConfigError(f"Configuration root must be a mapping: {path}")
 
     try:
-        return OmniVoiceConfig.model_validate(raw), path
+        config = OmniVoiceConfig.model_validate(raw)
+        if explicit_path is None:
+            config = _upgrade_legacy_generated_agent(config)
+        return config, path
     except ValidationError as exc:
         raise ConfigError(f"Invalid configuration {path}:\n{exc}") from exc
 
