@@ -1,3 +1,7 @@
+# OmniVoice configuration.
+# Add AI models as alias: "provider:model-name" and choose default_model.
+# API keys belong in the separate .env credentials file.
+
 agent:
   default_model: "gemini-flash"
   models:
@@ -17,24 +21,9 @@ hotkey:
 
 speech:
   stt:
-    enabled: true
-    provider: "whisper_cpp"
+    # Local whisper.cpp model: setup installs small.en. Other models require
+    # a matching ggml-MODEL.bin file in %LOCALAPPDATA%\OmniVoice\speech\models.
     model: "small.en"
-    language: "en"
-    timeout_seconds: 60
-    threads: null
-    executable_path: null
-    model_path: null
   tts:
-    enabled: true
-    provider: "windows_sapi"
+    # Installed Windows SAPI voice for short status messages.
     voice: "Microsoft Zira Desktop"
-    rate: 0
-    volume: 100
-  microphone:
-    device: null
-  recording:
-    max_seconds: 30
-    sample_rate: 16000
-    minimum_seconds: 0.15
-    silence_rms_threshold: 80

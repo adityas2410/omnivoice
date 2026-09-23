@@ -1,6 +1,6 @@
 # OmniVoice
 
-OmniVoice is a Windows-first voice-dictation and constrained AI-action CLI. It records English speech while a global push-to-talk hotkey is held and transcribes it locally with `whisper.cpp`. The dictation hotkey types the literal transcript, while the separate agent hotkey asks a configured Gemini, Groq, or local Ollama model for one validated keyboard-action plan. Both paths operate only while the original editable field still owns focus. Windows SAPI provides short fixed confirmations such as “Done.”
+OmniVoice is a Windows-first voice-dictation and constrained AI-action CLI. It records English speech while a global push-to-talk hotkey is held and transcribes it locally with `whisper.cpp`. The dictation hotkey types the literal transcript, while the separate agent hotkey asks a configured AI model for one validated keyboard-action plan. Both paths operate only while the original editable field still owns focus. Windows SAPI provides short fixed confirmations such as “Done.”
 
 ## Safety model
 
@@ -188,7 +188,7 @@ probed by startup, `/models`, or `/model`.
 ## Configuration
 
 On first launch, OmniVoice automatically creates
-`%APPDATA%\OmniVoice\config.yaml` with every setting and prints that path during
+`%APPDATA%\OmniVoice\config.yaml` with the common settings and prints that path during
 startup. This per-user file is the normal place to add or remove named model
 profiles for both packaged and source installations. Its location is always
 available through:
@@ -212,27 +212,9 @@ hotkey:
 
 speech:
   stt:
-    enabled: true
-    provider: "whisper_cpp"
     model: "small.en"
-    language: "en"
-    timeout_seconds: 60
-    threads: null
-    executable_path: null
-    model_path: null
   tts:
-    enabled: true
-    provider: "windows_sapi"
     voice: "Microsoft Zira Desktop"
-    rate: 0
-    volume: 100
-  microphone:
-    device: null
-  recording:
-    max_seconds: 30
-    sample_rate: 16000
-    minimum_seconds: 0.15
-    silence_rms_threshold: 80
 ```
 
 Fresh installations intentionally contain no model assumptions, so `/models`
@@ -282,7 +264,19 @@ sending keyboard input.
 Pass `--config C:\path\to\config.yaml` only when intentionally using a
 different file.
 
-`threads: null` chooses a bounded value from the available CPU count. `device: null` uses the Windows default input. A device may instead be a numeric identifier or exact name from `omnivoice speech devices`. `executable_path` and `model_path` override the managed assets.
+`speech.stt.model` selects the local Whisper file named
+`ggml-<model>.bin` in `%LOCALAPPDATA%\OmniVoice\speech\models`.
+`omnivoice speech setup` installs only `small.en`; to use a different Whisper
+model, place its `ggml-<model>.bin` file in that folder and set `model` to the
+matching name. For example, `ggml-medium.en.bin` uses `model: medium.en`.
+Changing the model name does not download a model. `speech.tts.voice` selects
+an installed Windows SAPI voice for short status messages; it does not affect
+transcription or the AI agent model.
+
+Advanced overrides remain available when needed: `speech.stt.model_path` and
+`executable_path` select files outside the managed folder; `threads` controls
+Whisper CPU use; `speech.microphone.device` selects an input from
+`omnivoice speech devices`; and `speech.recording` controls audio capture.
 
 STT and TTS can be disabled independently. If the configured SAPI voice is missing, OmniVoice warns and uses the Windows default voice. TTS failures never change a successful keyboard outcome.
 
