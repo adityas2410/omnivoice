@@ -205,13 +205,6 @@ agent:
   models: {}
   context:
     mode: "off"
-    document_max_characters: 50000
-    semantic_max_characters: 20000
-    semantic_max_elements: 500
-    semantic_max_depth: 16
-    target_before_max_characters: 16000
-    target_after_max_characters: 8000
-    capture_timeout_seconds: 5
 
 hotkey:
   push_to_talk: "ctrl+alt+space"
@@ -250,32 +243,24 @@ example:
 agent:
   default_model: "gemini-flash"
   models:
-    gemini-flash:
-      selector: "google:gemini-3.8-flash"
-      input_token_budget: 1000000
-    claude:
-      selector: "anthropic:claude-sonnet-4-5"
-      input_token_budget: 200000
-    openai:
-      selector: "openai:gpt-5"
-      input_token_budget: 400000
-    groq-fast:
-      selector: "groq:openai/gpt-oss-20b"
-      input_token_budget: 100000
-    ollama-local:
-      selector: "ollama:qwen3:8b"
-      input_token_budget: 12000
+    gemini-flash: "google:gemini-3.8-flash"
+    claude: "anthropic:claude-sonnet-4-5"
+    openai: "openai:gpt-5"
+    groq-fast: "groq:openai/gpt-oss-20b"
+    ollama-local: "ollama:qwen3:8b"
+  context:
+    mode: "off"  # Set to "uia" to enable UI context at startup.
 ```
 
 Agent models use named profiles so `/model NAME` can change the active model for
 the current process. `default_model` is restored whenever OmniVoice starts and
 must name an entry in `models`; runtime switching never rewrites the YAML file.
 `/models` only displays configured profiles and does not contact any provider.
-The original `alias: "provider:model"` form remains valid and uses a 48,000-token
-estimated input budget. Expanded profiles can set `input_token_budget` for the
-selected model. OmniVoice estimates request size deterministically from UTF-8 bytes,
-keeps the spoken request and selection intact, and trims duplicate semantic detail,
-distant document text, then distant caret context when necessary.
+Each model is one `alias: "provider:model-id"` entry. The provider prefix is
+required by Pydantic AI to route arbitrary model IDs; OmniVoice does not list or
+hardcode model IDs. No model budget needs to be configured. OmniVoice uses a
+generous internal estimated input allowance and bounds context capture internally.
+Provider limits still apply to requests they receive.
 OmniVoice also creates an instruction-only `%APPDATA%\OmniVoice\.env` and prints
 that path during startup. Pydantic AI's provider prefix determines credential
 lookup. Common selectors include `google:MODEL`, `anthropic:MODEL`,
