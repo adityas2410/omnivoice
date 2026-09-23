@@ -29,6 +29,9 @@ CONFIG_HEADER = """# OmniVoice configuration.
 # Provider prefixes and credentials follow Pydantic AI's model documentation.
 # Examples: google:..., anthropic:..., openai:..., groq:..., ollama:...
 # API keys belong in %APPDATA%\\OmniVoice\\.env, never in this YAML file.
+# speech.stt.model selects a local ggml-MODEL.bin file. The setup command
+# installs small.en; install other Whisper model files in the speech/models folder.
+# speech.tts.voice names an installed Windows SAPI voice.
 
 """
 
@@ -166,6 +169,13 @@ class STTConfig(BaseModel):
     executable_path: Path | None = None
     model_path: Path | None = None
 
+    @field_validator("model")
+    @classmethod
+    def validate_model_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]*", value):
+            raise ValueError("speech.stt.model must be a Whisper model name")
+        return value
+
 
 class TTSConfig(BaseModel):
     """Configure fixed application-status speech independently from STT."""
@@ -267,8 +277,18 @@ def load_config(explicit_path: Path | None = None) -> tuple[OmniVoiceConfig, Pat
         if explicit_path is not None:
             raise ConfigError(f"Configuration file does not exist: {path}")
         config = OmniVoiceConfig()
-        generated = config.model_dump(mode="json")
-        generated["agent"]["context"] = {"mode": "off"}
+        generated = {
+            "agent": {
+                "default_model": config.agent.default_model,
+                "models": config.agent.models,
+                "context": {"mode": config.agent.context.mode},
+            },
+            "hotkey": config.hotkey.model_dump(mode="json"),
+            "speech": {
+                "stt": {"model": config.speech.stt.model},
+                "tts": {"voice": config.speech.tts.voice},
+            },
+        }
         serialized = CONFIG_HEADER + yaml.safe_dump(
             generated, sort_keys=False, allow_unicode=True
         )

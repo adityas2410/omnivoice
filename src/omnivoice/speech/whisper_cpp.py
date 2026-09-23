@@ -50,7 +50,9 @@ class WhisperCppSTT:
         if not self._executable.is_file():
             return Readiness(False, "run 'omnivoice speech setup'")
         if not self._model_path.is_file():
-            return Readiness(False, "run 'omnivoice speech setup'")
+            if self.model == "small.en":
+                return Readiness(False, "run 'omnivoice speech setup'")
+            return Readiness(False, "install the selected Whisper model file")
         return Readiness(True, "local assets ready")
 
     def command(self, recording: Recording, output_base: Path) -> list[str]:

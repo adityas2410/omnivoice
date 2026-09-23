@@ -40,6 +40,10 @@ def test_missing_default_config_is_created_without_assumed_models(
     assert config.hotkey.push_to_talk == "ctrl+alt+space"
     assert config.hotkey.agent_push_to_talk == "ctrl+alt+shift+space"
     assert written["hotkey"]["agent_push_to_talk"] == "ctrl+alt+shift+space"
+    assert written["speech"] == {
+        "stt": {"model": "small.en"},
+        "tts": {"voice": "Microsoft Zira Desktop"},
+    }
     assert config.speech.stt.provider == "whisper_cpp"
     assert config.speech.stt.model == "small.en"
     assert config.speech.tts.voice == "Microsoft Zira Desktop"
@@ -175,6 +179,7 @@ speech:
         "speech:\n  recording:\n    max_seconds: 0\n",
         "speech:\n  stt:\n    provider: unknown\n",
         "speech:\n  tts:\n    provider: unknown\n",
+        "speech:\n  stt:\n    model: ../other.bin\n",
     ],
 )
 def test_invalid_speech_configuration_fails(tmp_path: Path, yaml_text: str) -> None:

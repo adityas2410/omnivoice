@@ -137,7 +137,8 @@ async def run(args: argparse.Namespace) -> int:
             config.speech.stt.executable_path or default_whisper_executable()
         ).expanduser()
         model_path = (
-            config.speech.stt.model_path or default_whisper_model()
+            config.speech.stt.model_path
+            or default_whisper_model(model=config.speech.stt.model)
         ).expanduser()
         stt = WhisperCppSTT(
             executable=executable,

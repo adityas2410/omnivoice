@@ -44,6 +44,15 @@ def test_pinned_model_uses_the_published_file_digest() -> None:
     assert "/resolve/main/" not in setup.WHISPER_MODEL_URL
 
 
+def test_configured_model_name_selects_matching_managed_file(tmp_path: Path) -> None:
+    assert setup.default_whisper_model(tmp_path, model="medium.en") == (
+        tmp_path / "models" / "ggml-medium.en.bin"
+    )
+    assert setup.default_whisper_model(tmp_path) == (
+        tmp_path / "models" / "ggml-small.en.bin"
+    )
+
+
 def test_verified_setup_installs_and_reuses_assets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

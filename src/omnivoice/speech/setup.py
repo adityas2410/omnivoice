@@ -56,11 +56,11 @@ def default_whisper_executable(root: Path | None = None) -> Path:
     return base / f"whisper.cpp-{WHISPER_CPP_RELEASE}" / "whisper-cli.exe"
 
 
-def default_whisper_model(root: Path | None = None) -> Path:
-    """Return the pinned English model path."""
+def default_whisper_model(root: Path | None = None, *, model: str = "small.en") -> Path:
+    """Return the path for a named Whisper model in the managed model folder."""
 
     base = root or default_speech_directory()
-    return base / "models" / WHISPER_MODEL_NAME
+    return base / "models" / f"ggml-{model}.bin"
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
