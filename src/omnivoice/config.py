@@ -24,7 +24,7 @@ class ConfigError(RuntimeError):
 
 
 CONFIG_HEADER = """# OmniVoice configuration.
-# Add model profiles under agent.models as: alias: "provider:model-name"
+# Add models under agent.models as: alias: "provider:model-name"
 # Set agent.default_model to one of those aliases.
 # Provider prefixes and credentials follow Pydantic AI's model documentation.
 # Examples: google:..., anthropic:..., openai:..., groq:..., ollama:...
@@ -40,7 +40,7 @@ CREDENTIALS_TEMPLATE = """# OmniVoice provider credentials. Keep this file priva
 """
 
 
-DEFAULT_MODEL_INPUT_TOKEN_BUDGET = 48_000
+DEFAULT_MODEL_INPUT_TOKEN_BUDGET = 1_000_000
 
 
 def _validate_model_selector(selector: str, alias: str) -> str:
@@ -69,12 +69,12 @@ class AgentContextConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     mode: Literal["off", "uia"] = "off"
-    document_max_characters: int = Field(default=50_000, ge=1_000, le=500_000)
-    semantic_max_characters: int = Field(default=20_000, ge=1_000, le=200_000)
-    semantic_max_elements: int = Field(default=500, ge=10, le=5_000)
-    semantic_max_depth: int = Field(default=16, ge=1, le=64)
-    target_before_max_characters: int = Field(default=16_000, ge=0, le=200_000)
-    target_after_max_characters: int = Field(default=8_000, ge=0, le=200_000)
+    document_max_characters: int = Field(default=100_000, ge=1_000, le=500_000)
+    semantic_max_characters: int = Field(default=40_000, ge=1_000, le=200_000)
+    semantic_max_elements: int = Field(default=1_000, ge=10, le=5_000)
+    semantic_max_depth: int = Field(default=24, ge=1, le=64)
+    target_before_max_characters: int = Field(default=32_000, ge=0, le=200_000)
+    target_after_max_characters: int = Field(default=16_000, ge=0, le=200_000)
     capture_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
 
 
@@ -267,8 +267,10 @@ def load_config(explicit_path: Path | None = None) -> tuple[OmniVoiceConfig, Pat
         if explicit_path is not None:
             raise ConfigError(f"Configuration file does not exist: {path}")
         config = OmniVoiceConfig()
+        generated = config.model_dump(mode="json")
+        generated["agent"]["context"] = {"mode": "off"}
         serialized = CONFIG_HEADER + yaml.safe_dump(
-            config.model_dump(mode="json"), sort_keys=False, allow_unicode=True
+            generated, sort_keys=False, allow_unicode=True
         )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -83,4 +83,4 @@ def test_expanded_profile_budget_is_snapshotted_and_strings_use_fallback() -> No
 
     assert registry.snapshot().input_token_budget == 100_000  # type: ignore[union-attr]
     local, _ = registry.select("local")
-    assert local.input_token_budget == 48_000
+    assert local.input_token_budget == 1_000_000

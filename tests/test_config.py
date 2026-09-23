@@ -31,11 +31,12 @@ def test_missing_default_config_is_created_without_assumed_models(
     assert config.agent.default_model is None
     assert config.agent.models == {}
     assert config.agent.context.mode == "off"
-    assert config.agent.context.document_max_characters == 50_000
+    assert config.agent.context.document_max_characters == 100_000
     written = yaml.safe_load(expected_path.read_text(encoding="utf-8"))
     assert "API keys belong in" in expected_path.read_text(encoding="utf-8")
     assert written["agent"]["default_model"] is None
     assert written["agent"]["models"] == {}
+    assert written["agent"]["context"] == {"mode": "off"}
     assert config.hotkey.push_to_talk == "ctrl+alt+space"
     assert config.hotkey.agent_push_to_talk == "ctrl+alt+shift+space"
     assert written["hotkey"]["agent_push_to_talk"] == "ctrl+alt+shift+space"
