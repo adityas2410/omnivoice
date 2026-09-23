@@ -6,14 +6,11 @@ import asyncio
 import json
 import logging
 import math
-import os
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from groq import AsyncGroq
-from openai import AsyncOpenAI
 import pydantic_ai
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import (
@@ -21,14 +18,10 @@ from pydantic_ai.exceptions import (
     ModelHTTPError,
     UnexpectedModelBehavior,
     UsageLimitExceeded,
+    UserError,
 )
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.models.groq import GroqModel
-from pydantic_ai.models.ollama import OllamaModel
+from pydantic_ai.models import Model, infer_model
 from pydantic_ai.output import NativeOutput
-from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai.providers.groq import GroqProvider
-from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
@@ -46,7 +39,6 @@ from omnivoice.models import ModelSelection
 MODEL_REQUEST_TIMEOUT_SECONDS = 20.0
 PLAN_DEADLINE_SECONDS = 30.0
 MAX_OUTPUT_TOKENS = 1_024
-OLLAMA_LOCAL_BASE_URL = "http://localhost:11434/v1"
 LOGGER = logging.getLogger(__name__)
 _SAFE_PROVIDER_VALUE = re.compile(r"[A-Za-z0-9._:/-]{1,128}\Z")
 
@@ -119,11 +111,11 @@ def _provider_failure(
     """Create useful diagnostics without exposing provider response bodies."""
 
     provider = selection.selector.partition(":")[0]
-    display_name = {
-        "gemini": "Gemini",
-        "groq": "Groq",
-        "ollama": "Local Ollama",
-    }.get(provider, provider or "Model provider")
+    display_name = (
+        provider.replace("-", " ").replace("/", " ").title()
+        if provider
+        else "Model provider"
+    )
     if isinstance(exc, ModelHTTPError):
         category = _http_failure_category(exc.status_code)
         provider_code = _provider_error_code(exc.body)
@@ -165,60 +157,31 @@ def _provider_failure(
 
 @dataclass(frozen=True, slots=True)
 class ModelHandle:
-    """Pair one request model with cleanup for its provider SDK client."""
+    """Pair one request model with generic provider lifecycle cleanup."""
 
-    model: Any
+    model: Model
     close: Callable[[], Awaitable[None]]
 
 
 def build_model(selection: ModelSelection) -> ModelHandle:
-    """Lazily construct exactly the provider selected for this request."""
+    """Resolve any installed Pydantic AI provider from its standard selector."""
 
-    provider_name, _, model_name = selection.selector.partition(":")
-    if provider_name == "gemini":
-        api_key = (
-            os.environ.get("GEMINI_API_KEY", "").strip()
-            or os.environ.get("GOOGLE_API_KEY", "").strip()
-        )
-        if not api_key:
-            raise PlanGenerationError(
-                "Gemini is not configured. Add GEMINI_API_KEY to the provider credentials file."
-            )
-        provider = GoogleProvider(api_key=api_key)
-        model = GoogleModel(model_name, provider=provider)
+    try:
+        model = infer_model(selection.selector)
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise PlanGenerationError(
+            "The selected Pydantic AI provider dependency is not installed."
+        ) from exc
+    except (UserError, ValueError) as exc:
+        raise PlanGenerationError(
+            "The selected model could not be configured. Check its Pydantic AI "
+            "provider prefix, model name, and provider credentials."
+        ) from exc
 
-        async def close_google() -> None:
-            await provider.client.aio.aclose()
+    async def close_model() -> None:
+        await model.__aexit__(None, None, None)
 
-        return ModelHandle(model=model, close=close_google)
-
-    if provider_name == "groq":
-        api_key = os.environ.get("GROQ_API_KEY", "").strip()
-        if not api_key:
-            raise PlanGenerationError(
-                "Groq is not configured. Add GROQ_API_KEY to the provider credentials file."
-            )
-        client = AsyncGroq(
-            api_key=api_key,
-            max_retries=0,
-            timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
-        )
-        model = GroqModel(model_name, provider=GroqProvider(groq_client=client))
-        return ModelHandle(model=model, close=client.close)
-
-    if provider_name == "ollama":
-        client = AsyncOpenAI(
-            base_url=OLLAMA_LOCAL_BASE_URL,
-            api_key="ollama-local",
-            max_retries=0,
-            timeout=MODEL_REQUEST_TIMEOUT_SECONDS,
-        )
-        model = OllamaModel(model_name, provider=OllamaProvider(openai_client=client))
-        return ModelHandle(model=model, close=client.close)
-
-    # Configuration validation should make this unreachable, but request-time
-    # code remains fail-closed if a registry is constructed another way.
-    raise PlanGenerationError("The selected model provider is unsupported.")
+    return ModelHandle(model=model, close=close_model)
 
 
 class ActionPlanGenerator:
@@ -256,6 +219,7 @@ class ActionPlanGenerator:
         cancel_task: asyncio.Task[bool] | None = None
         try:
             handle = self._model_factory(selection)
+            await handle.model.__aenter__()
             request = _build_request(
                 transcript,
                 selected_text,

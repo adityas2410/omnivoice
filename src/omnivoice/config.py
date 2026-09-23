@@ -26,16 +26,17 @@ class ConfigError(RuntimeError):
 CONFIG_HEADER = """# OmniVoice configuration.
 # Add model profiles under agent.models as: alias: "provider:model-name"
 # Set agent.default_model to one of those aliases.
-# Provider mapping: gemini:... uses GEMINI_API_KEY, groq:... uses GROQ_API_KEY,
-# and local ollama:... uses no key.
+# Provider prefixes and credentials follow Pydantic AI's model documentation.
+# Examples: google:..., anthropic:..., openai:..., groq:..., ollama:...
 # API keys belong in %APPDATA%\\OmniVoice\\.env, never in this YAML file.
 
 """
 
 CREDENTIALS_TEMPLATE = """# OmniVoice provider credentials. Keep this file private.
 # Add only keys required by providers selected in config.yaml.
-# Examples: gemini:... reads GEMINI_API_KEY and groq:... reads GROQ_API_KEY.
-# Local ollama:... models need no API key.
+# Use the standard environment variable documented by the Pydantic AI provider.
+# Examples: GOOGLE_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY.
+# Local providers may require a base URL such as OLLAMA_BASE_URL.
 """
 
 
@@ -46,12 +47,8 @@ def _validate_model_selector(selector: str, alias: str) -> str:
     if selector != selector.strip() or any(char.isspace() for char in selector):
         raise ValueError(f"model selector for {alias!r} must not contain whitespace")
     provider, separator, model_name = selector.partition(":")
-    if not separator or not model_name:
+    if not separator or not provider or not model_name:
         raise ValueError(f"model selector for {alias!r} must use '<provider>:<model>'")
-    if provider not in {"gemini", "groq", "ollama"}:
-        raise ValueError(
-            f"model selector for {alias!r} uses unsupported provider {provider!r}"
-        )
     return selector
 
 

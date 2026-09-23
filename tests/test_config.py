@@ -213,7 +213,9 @@ def test_named_agent_models_load_in_yaml_order(tmp_path: Path) -> None:
 agent:
   default_model: gemini-flash
   models:
-    gemini-flash: gemini:gemini-3.8-flash
+    gemini-flash: google:gemini-3.8-flash
+    claude: anthropic:claude-sonnet-4-5
+    openai: openai:gpt-5
     groq-fast: groq:openai/gpt-oss-20b
     groq-large: groq:openai/gpt-oss-120b
     ollama-local: ollama:qwen3:8b
@@ -226,11 +228,14 @@ agent:
     assert config.agent.default_model == "gemini-flash"
     assert list(config.agent.models) == [
         "gemini-flash",
+        "claude",
+        "openai",
         "groq-fast",
         "groq-large",
         "ollama-local",
     ]
-    assert config.agent.models["gemini-flash"] == "gemini:gemini-3.8-flash"
+    assert config.agent.models["gemini-flash"] == "google:gemini-3.8-flash"
+    assert config.agent.models["claude"] == "anthropic:claude-sonnet-4-5"
     assert config.agent.models["ollama-local"] == "ollama:qwen3:8b"
 
 
@@ -275,8 +280,6 @@ agent:
         "agent:\n  models:\n    local: ollama:qwen3:8b\n",
         "agent:\n  default_model: local\n  models: {}\n",
         "agent:\n  default_model: BadAlias\n  models:\n    BadAlias: ollama:qwen3:8b\n",
-        "agent:\n  default_model: local\n  models:\n    local: qwen3:8b\n",
-        "agent:\n  default_model: local\n  models:\n    local: openai:gpt-5\n",
         "agent:\n  default_model: local\n  models:\n    local: 'ollama:'\n",
         "agent:\n  default_model: local\n  models:\n    local: ' ollama:qwen3'\n",
         "agent:\n  default_model: local\n  models:\n    local:\n      selector: ollama:qwen3:8b\n      input_token_budget: 100\n",
