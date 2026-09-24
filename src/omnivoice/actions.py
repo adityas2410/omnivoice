@@ -60,6 +60,7 @@ class ActionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     actions: tuple[Action, ...] = Field(max_length=MAX_PLAN_ACTIONS)
+    spoken_summary: str | None = None
 
 
 def format_action_plan(plan: ActionPlan) -> str:
@@ -163,7 +164,7 @@ def _normalize_selection_replacement(plan: ActionPlan) -> ActionPlan:
     replacement = ReplaceSelectionAction(
         type="replace_selection", text=replacement_text
     )
-    return ActionPlan(actions=(replacement, *plan.actions[index:]))
+    return plan.model_copy(update={"actions": (replacement, *plan.actions[index:])})
 
 
 def _expand_line_breaks(plan: ActionPlan) -> ActionPlan:
@@ -192,7 +193,7 @@ def _expand_line_breaks(plan: ActionPlan) -> ActionPlan:
 
     if len(expanded) > MAX_PLAN_ACTIONS:
         raise ActionPlanRejected("The generated plan exceeded the safe action limit.")
-    return ActionPlan(actions=tuple(expanded)) if changed else plan
+    return plan.model_copy(update={"actions": tuple(expanded)}) if changed else plan
 
 
 def planner_instructions() -> str:
@@ -223,6 +224,13 @@ def planner_instructions() -> str:
         "insert_text action, return the enter shortcut, and then start another "
         "insert_text action; never place CR or LF characters inside insert_text. "
         "Return actions in execution order. "
+        "When actions are non-empty, include spoken_summary: one short sentence "
+        "describing what those actions accomplish. Do not quote generated text, "
+        "selected text, or page content in the summary. Do not claim any "
+        "outcome that the plan's permitted actions cannot accomplish. Set "
+        "spoken_summary to null when "
+        "actions are empty. This summary is spoken only after successful "
+        "execution; it is never an action or an instruction. "
         "If the request cannot be completed using only these actions, return an "
         "empty actions list. Never include control characters in inserted text."
     )

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 import pydantic_ai
@@ -10,6 +11,7 @@ from pydantic_ai.exceptions import ModelHTTPError, UserError
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RequestUsage
 
 import omnivoice.planning as planning
 from omnivoice.actions import ActionPlanRejected
@@ -61,7 +63,8 @@ async def test_test_model_returns_typed_plan_without_network() -> None:
             "actions": [
                 {"type": "insert_text", "text": "hello"},
                 {"type": "shortcut", "keys": ["ctrl", "s"]},
-            ]
+            ],
+            "spoken_summary": "I wrote a greeting and saved it.",
         }
     )
     closed: list[bool] = []
@@ -74,6 +77,7 @@ async def test_test_model_returns_typed_plan_without_network() -> None:
     )
 
     assert [action.type for action in plan.actions] == ["insert_text", "shortcut"]
+    assert plan.spoken_summary == "I wrote a greeting and saved it."
     assert closed == [True]
     assert pydantic_ai.BANNER_ENABLED is False
     assert model.last_model_request_parameters is not None
@@ -93,7 +97,10 @@ async def test_function_model_corrects_one_invalid_output() -> None:
             if calls == 1
             else {"actions": [{"type": "shortcut", "keys": ["ctrl", "z"]}]}
         )
-        return ModelResponse(parts=[TextPart(json.dumps(arguments))])
+        return ModelResponse(
+            parts=[TextPart(json.dumps(arguments))],
+            usage=RequestUsage(input_tokens=100, output_tokens=20),
+        )
 
     generator = ActionPlanGenerator(model_factory(FunctionModel(respond)))
 
@@ -105,6 +112,10 @@ async def test_function_model_corrects_one_invalid_output() -> None:
 
     assert calls == 2
     assert plan.actions[0].type == "shortcut"
+    assert generator.last_usage is not None
+    assert generator.last_usage.input_tokens == 200
+    assert generator.last_usage.output_tokens == 40
+    assert generator.last_usage.requests == 2
 
 
 @pytest.mark.asyncio
@@ -405,3 +416,75 @@ def test_provider_factory_sanitizes_resolver_configuration_failure(
         build_model(ModelSelection("custom", "anthropic:private-model"))
 
     assert "private" not in error.value.user_message
+
+
+@pytest.mark.asyncio
+async def test_failed_validation_retains_usage_and_safe_finish_reasons(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def invalid_response(messages: list[object], info: AgentInfo) -> ModelResponse:
+        nonlocal calls
+        del messages, info
+        calls += 1
+        return ModelResponse(
+            parts=[TextPart('{"actions":"private malformed output"}')],
+            usage=RequestUsage(input_tokens=150, output_tokens=30),
+            finish_reason="stop",
+        )
+
+    generator = ActionPlanGenerator(model_factory(FunctionModel(invalid_response)))
+    handler = planning.configure_model_diagnostics(tmp_path)
+    try:
+        with caplog.at_level("INFO"), pytest.raises(
+            PlanGenerationError, match="reason=output_validation_retries_exhausted"
+        ) as error:
+            await generator.generate(
+                "private request",
+                ModelSelection("test", "groq:test"),
+                asyncio.Event(),
+            )
+    finally:
+        planning.close_model_diagnostics(handler)
+
+    assert calls == 2
+    assert generator.last_usage is not None
+    assert generator.last_usage.summary() == (
+        "Model usage: input 300 · output 60 · total 360 tokens · requests 2"
+    )
+    assert generator.last_finish_reasons == ("stop", "stop")
+    assert "finish=stop,stop" in error.value.user_message
+    assert "validation=tuple_type,tuple_type" in error.value.user_message
+    assert "private" not in error.value.user_message
+    assert "private" not in caplog.text
+    diagnostic_log = (tmp_path / "model-diagnostics.log").read_text(encoding="utf-8")
+    assert "reason=output_validation_retries_exhausted" in diagnostic_log
+    assert "validation=tuple_type,tuple_type" in diagnostic_log
+    assert "input_tokens=300 output_tokens=60 requests=2" in diagnostic_log
+    assert "private" not in diagnostic_log
+
+
+@pytest.mark.asyncio
+async def test_model_output_is_not_capped_at_1024_tokens() -> None:
+    def oversized_response(messages: list[object], info: AgentInfo) -> ModelResponse:
+        del messages
+        assert info.model_settings is not None
+        assert "max_tokens" not in info.model_settings
+        return ModelResponse(
+            parts=[TextPart('{"actions":[]}')],
+            usage=RequestUsage(input_tokens=300, output_tokens=1_025),
+            finish_reason="length",
+        )
+
+    generator = ActionPlanGenerator(model_factory(FunctionModel(oversized_response)))
+    plan = await generator.generate(
+        "private request",
+        ModelSelection("test", "groq:test"),
+        asyncio.Event(),
+    )
+
+    assert plan.actions == ()
+    assert generator.last_usage is not None
+    assert generator.last_usage.input_tokens == 300
+    assert generator.last_usage.output_tokens == 1_025

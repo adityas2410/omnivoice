@@ -83,7 +83,8 @@ def test_line_breaks_become_guarded_enter_actions(separator: str) -> None:
                 type="insert_text",
                 text=f"First sentence.{separator}Second sentence.",
             ),
-        )
+        ),
+        spoken_summary="I added two sentences.",
     )
 
     validated = validate_action_plan(plan)
@@ -94,6 +95,7 @@ def test_line_breaks_become_guarded_enter_actions(separator: str) -> None:
         "insert_text",
     ]
     assert validated.actions[1] == ShortcutAction(type="shortcut", keys=("enter",))
+    assert validated.spoken_summary == "I added two sentences."
 
 
 def test_line_break_expansion_still_obeys_action_limit() -> None:
@@ -194,7 +196,8 @@ def test_selection_replacement_normalizes_following_text_fragments() -> None:
             ShortcutAction(type="shortcut", keys=("enter",)),
             InsertTextAction(type="insert_text", text="Second line."),
             ShortcutAction(type="shortcut", keys=("ctrl", "s")),
-        )
+        ),
+        spoken_summary="I revised the selection.",
     )
 
     validated = validate_action_plan(plan, has_selection=True)
@@ -205,7 +208,8 @@ def test_selection_replacement_normalizes_following_text_fragments() -> None:
                 type="replace_selection", text="First line.\nSecond line."
             ),
             ShortcutAction(type="shortcut", keys=("ctrl", "s")),
-        )
+        ),
+        spoken_summary="I revised the selection.",
     )
 
 

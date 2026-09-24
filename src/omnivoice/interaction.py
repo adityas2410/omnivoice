@@ -23,7 +23,7 @@ from omnivoice.context import (
     unavailable_context,
 )
 from omnivoice.models import ModelRegistry, ModelSelection
-from omnivoice.planning import PlanGenerationError
+from omnivoice.planning import ModelTokenUsage, PlanGenerationError
 from omnivoice.speech.ports import (
     AudioRecorder,
     ReadyCue,
@@ -43,6 +43,17 @@ from omnivoice.windows.keyboard import InputError, KeyboardExecutor
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _usable_spoken_summary(summary: str | None) -> str | None:
+    """Ignore unsuitable model speech without invalidating safe keyboard actions."""
+
+    if summary is None:
+        return None
+    speech = summary.strip()
+    return speech if 0 < len(speech) <= 300 and speech.isprintable() else None
+
+
 class RequestState(StrEnum):
     """Expose each externally meaningful stage of a hotkey request."""
 
@@ -82,6 +93,8 @@ class FocusPort(Protocol):
 
 class ActionPlanPort(Protocol):
     """Describe the one-shot model boundary required by orchestration."""
+
+    last_usage: ModelTokenUsage | None
 
     async def generate(
         self,
@@ -289,6 +302,8 @@ class InteractionController:
         recording: Recording | None = None
         recorder_active = False
         selection_context: SelectionContext | None = None
+        model_requested = False
+        completion_speech = "Done."
         try:
             await self._stop_pending_speech()
             if mode is RequestMode.AGENT and selection is None:
@@ -405,6 +420,7 @@ class InteractionController:
                     f"Generating an action plan with {selection.alias} "
                     f"({selection.selector})..."
                 )
+                model_requested = True
                 plan = validate_action_plan(
                     await self._planner.generate(
                         transcript,
@@ -426,9 +442,10 @@ class InteractionController:
                     )
                 await self._execute_plan(lease, plan, selection_context)
                 completion = "AI action plan completed."
+                completion_speech = _usable_spoken_summary(plan.spoken_summary) or "Done."
             self._status(completion)
             self._finish(RequestState.COMPLETED)
-            await self._speak("Done.")
+            await self._speak(completion_speech)
         except InvalidTargetError as exc:
             message = f"Target unavailable: {exc}"
             self._status(message)
@@ -495,6 +512,11 @@ class InteractionController:
                 "Request failed." if mode is RequestMode.AGENT else "Cancelled."
             )
         finally:
+            if model_requested and self._planner is not None:
+                usage = self._planner.last_usage
+                self._status(
+                    usage.summary() if usage is not None else "Model usage: unavailable"
+                )
             if recorder_active and self._recorder is not None:
                 await self._safe_cancel_recorder()
             if recording is not None:

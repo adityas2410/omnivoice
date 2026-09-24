@@ -18,15 +18,27 @@ from omnivoice.context import (
     UIContext,
 )
 from omnivoice.config import AgentConfig
-from omnivoice.interaction import InteractionController, RequestMode, RequestState
+from omnivoice.interaction import (
+    InteractionController,
+    RequestMode,
+    RequestState,
+    _usable_spoken_summary,
+)
 from omnivoice.models import ModelRegistry, ModelSelection
-from omnivoice.planning import PlanGenerationError
+from omnivoice.planning import ModelTokenUsage, PlanGenerationError
 from omnivoice.speech.ports import Readiness, Recording, SpeechToTextError
 from omnivoice.windows.focus import FocusLease, SelectionContext
 from omnivoice.windows.keyboard import INPUT, KeyboardExecutor
 
 
 LEASE = FocusLease((1, 2, 3), 100, 200, 50004)
+
+
+def test_spoken_summary_must_be_short_and_single_line() -> None:
+    assert _usable_spoken_summary("  I drafted a reply.  ") == "I drafted a reply."
+    assert _usable_spoken_summary("Line one\nLine two") is None
+    assert _usable_spoken_summary("x" * 301) is None
+    assert _usable_spoken_summary(None) is None
 
 
 class FakeFocus:
@@ -182,6 +194,7 @@ class FakePlanner:
         self.gate: asyncio.Event | None = None
         self.error: Exception | None = None
         self.contexts: list[CapturedContext | None] = []
+        self.last_usage = None
 
     async def generate(
         self,
@@ -415,8 +428,9 @@ async def test_literal_dictation_never_calls_action_planner(tmp_path: Path) -> N
     planner = FakePlanner(
         ActionPlan(actions=(ShortcutAction(type="shortcut", keys=("ctrl", "s")),))
     )
+    statuses: list[str] = []
     controller, _, _, _, _ = make_controller(
-        tmp_path, planner=planner, models=configured_models()
+        tmp_path, planner=planner, models=configured_models(), statuses=statuses
     )
 
     controller.hotkey_pressed(RequestMode.DICTATION)
@@ -426,6 +440,7 @@ async def test_literal_dictation_never_calls_action_planner(tmp_path: Path) -> N
 
     assert planner.calls == []
     assert controller.last_outcome is RequestState.COMPLETED
+    assert not any(status.startswith("Model usage:") for status in statuses)
 
 
 @pytest.mark.asyncio
@@ -533,9 +548,11 @@ async def test_agent_request_executes_validated_text_and_shortcut(
                 InsertTextAction(type="insert_text", text="First sentence."),
                 ShortcutAction(type="shortcut", keys=("enter",)),
                 InsertTextAction(type="insert_text", text="Second sentence."),
-            )
+            ),
+            spoken_summary="I wrote two sentences.",
         )
     )
+    planner.last_usage = ModelTokenUsage(2_341, 128, 2)
     controller, backend, _, stt, tts = make_controller(
         tmp_path, planner=planner, models=configured_models(), statuses=statuses
     )
@@ -555,9 +572,12 @@ async def test_agent_request_executes_validated_text_and_shortcut(
     ]
     assert len(backend.sent) == len("First sentence.Second sentence.") + 1
     assert controller.last_outcome is RequestState.COMPLETED
-    assert tts.messages == ["Done."]
+    assert tts.messages == ["I wrote two sentences."]
     assert any(
         status.startswith('Model output: {"actions":') for status in statuses
+    )
+    assert statuses[-1] == (
+        "Model usage: input 2,341 · output 128 · total 2,469 tokens · requests 2"
     )
     assert stt.transcript not in caplog.text
     assert "hello" not in caplog.text
@@ -919,11 +939,13 @@ async def test_provider_failure_sends_no_input_and_uses_fixed_status(
     tmp_path: Path,
 ) -> None:
     planner = FakePlanner()
+    planner.last_usage = ModelTokenUsage(30_000, 1_100, 2)
     planner.error = PlanGenerationError(
         "Local Ollama request failed. Ensure Ollama is running and the selected model is installed."
     )
+    statuses: list[str] = []
     controller, backend, _, _, tts = make_controller(
-        tmp_path, planner=planner, models=configured_models()
+        tmp_path, planner=planner, models=configured_models(), statuses=statuses
     )
 
     controller.hotkey_pressed(RequestMode.AGENT)
@@ -934,6 +956,9 @@ async def test_provider_failure_sends_no_input_and_uses_fixed_status(
     assert backend.sent == []
     assert controller.last_outcome is RequestState.FAILED
     assert tts.messages == ["Request failed."]
+    assert statuses[-1] == (
+        "Model usage: input 30,000 · output 1,100 · total 31,100 tokens · requests 2"
+    )
 
 
 @pytest.mark.asyncio
@@ -943,7 +968,8 @@ async def test_partial_shortcut_stops_remaining_agent_actions(tmp_path: Path) ->
             actions=(
                 ShortcutAction(type="shortcut", keys=("ctrl", "s")),
                 InsertTextAction(type="insert_text", text="must not type"),
-            )
+            ),
+            spoken_summary="I saved the document.",
         )
     )
     backend = FakeBackend(partial=True)
