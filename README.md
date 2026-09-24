@@ -1,6 +1,6 @@
 # OmniVoice
 
-OmniVoice is a Windows-first voice-dictation and constrained AI-action CLI. It records English speech while a global push-to-talk hotkey is held and transcribes it locally with `whisper.cpp`. The dictation hotkey types the literal transcript, while the separate agent hotkey asks a configured AI model for one validated keyboard-action plan. Both paths operate only while the original editable field still owns focus. Windows SAPI provides short fixed confirmations such as “Done.”
+OmniVoice is a Windows-first voice-dictation and constrained AI-action CLI. It records English speech while a global push-to-talk hotkey is held and transcribes it locally with `whisper.cpp`. The dictation hotkey types the literal transcript, while the separate agent hotkey asks a configured AI model for one validated keyboard-action plan. Both paths operate only while the original editable field still owns focus. Windows SAPI gives a short fixed confirmation for dictation and speaks the agent's brief model-written summary only after its actions succeed; failures and cancellations use fixed phrases.
 
 ## Safety model
 
@@ -270,7 +270,7 @@ different file.
 model, place its `ggml-<model>.bin` file in that folder and set `model` to the
 matching name. For example, `ggml-medium.en.bin` uses `model: medium.en`.
 Changing the model name does not download a model. `speech.tts.voice` selects
-an installed Windows SAPI voice for short status messages; it does not affect
+an installed Windows SAPI voice for short statuses and agent summaries; it does not affect
 transcription or the AI agent model.
 
 Advanced overrides remain available when needed: `speech.stt.model_path` and
@@ -296,6 +296,15 @@ trimming, and it may contain sensitive selected text, document text, labels, and
 control descriptions.
 
 Operational logs contain provider and model names, timings, state changes, byte and character counts, control metadata, and error categories. They do not contain credentials, audio, transcript text, prompts, model responses, generated text, spoken status content, focused-control contents, subprocess output, or temporary filenames.
+
+Model request metadata is also kept in a rotating file at
+`%APPDATA%\OmniVoice\model-diagnostics.log` (up to 1 MB plus two backups).
+It records safe failure categories, response finish reasons, validation error
+codes, request counts, and provider-reported token usage, including usage from
+failed structured-output runs when available. It never records prompt or
+response content. The terminal shows the diagnostic category and available
+token usage after an agent request; a provider that sends no usage data is
+reported as unavailable rather than zero.
 
 ## Testing
 
