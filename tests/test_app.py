@@ -1,12 +1,15 @@
 import argparse
+import logging
 from pathlib import Path
 
 import pytest
 
 from omnivoice.app import (
+    _GOOGLE_AFC_WARNING,
     _run_config_command,
     _start_hotkeys,
     _stop_hotkeys,
+    _suppress_spurious_google_afc_warning,
     build_parser,
 )
 from omnivoice.windows.hotkey import HotkeyError
@@ -91,3 +94,21 @@ def test_second_hotkey_start_failure_unregisters_first() -> None:
         _start_hotkeys(hotkeys)  # type: ignore[arg-type]
 
     assert events == ["start:dictation", "start:agent", "stop:dictation"]
+
+
+def test_only_known_google_afc_warning_is_suppressed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = logging.getLogger("google_genai.models")
+    logger.addFilter(_suppress_spurious_google_afc_warning)
+    try:
+        with caplog.at_level(logging.WARNING, logger="google_genai.models"):
+            logger.warning(_GOOGLE_AFC_WARNING)
+            logger.warning("A different Google warning")
+            logger.error("A Google error")
+    finally:
+        logger.removeFilter(_suppress_spurious_google_afc_warning)
+
+    assert _GOOGLE_AFC_WARNING not in caplog.text
+    assert "A different Google warning" in caplog.text
+    assert "A Google error" in caplog.text

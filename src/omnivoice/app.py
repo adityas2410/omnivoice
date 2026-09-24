@@ -19,7 +19,11 @@ from omnivoice.config import (
 )
 from omnivoice.interaction import InteractionController, RequestMode
 from omnivoice.models import ModelRegistry
-from omnivoice.planning import ActionPlanGenerator
+from omnivoice.planning import (
+    ActionPlanGenerator,
+    close_model_diagnostics,
+    configure_model_diagnostics,
+)
 from omnivoice.speech.audio import SoundDeviceRecorder, list_input_devices
 from omnivoice.speech.ports import SpeechError
 from omnivoice.speech.setup import (
@@ -37,6 +41,21 @@ from omnivoice.windows.speech import DisabledTTS, WindowsReadyCue, WindowsSapiTT
 
 
 LOGGER = logging.getLogger(__name__)
+_GOOGLE_AFC_WARNING = (
+    "Direct use of automatic function calling (AFC) in "
+    "AsyncModels.generate_content is not recommended. Instead, we recommend "
+    "to use AFC in AsyncChat.send_message. Similarly, direct use of AFC in "
+    "AsyncModels.generate_content_stream is not recommended. Instead, we "
+    "recommend to use AFC in AsyncChat.send_message_stream."
+)
+
+
+def _suppress_spurious_google_afc_warning(record: logging.LogRecord) -> bool:
+    return not (
+        record.name == "google_genai.models"
+        and record.levelno == logging.WARNING
+        and record.getMessage() == _GOOGLE_AFC_WARNING
+    )
 
 
 def _start_hotkeys(hotkeys: Sequence[GlobalHotkey]) -> None:
@@ -115,6 +134,12 @@ async def run(args: argparse.Namespace) -> int:
     models = ModelRegistry(config.agent)
     planner = ActionPlanGenerator()
     console = Console()
+    diagnostics_path = default_config_path().parent / "model-diagnostics.log"
+    try:
+        diagnostics_handler = configure_model_diagnostics(diagnostics_path.parent)
+    except OSError:
+        diagnostics_handler = None
+        console.status("Model diagnostic file unavailable; terminal diagnostics remain enabled.")
     loop = asyncio.get_running_loop()
     controller_holder: dict[str, InteractionController] = {}
 
@@ -250,6 +275,8 @@ async def run(args: argparse.Namespace) -> int:
         _start_hotkeys(hotkeys)
         console.status(f"Configuration: {config_description}")
         console.status(f"Provider credentials: {default_credentials_path()}")
+        if diagnostics_handler is not None:
+            console.status(f"Model diagnostics: {diagnostics_path} (metadata only).")
         console.status(f"Dictation hotkey: {dictation_spec.display_name}")
         console.status(f"Agent hotkey: {agent_spec.display_name}")
         context_state = "enabled" if controller.context_enabled else "disabled"
@@ -286,7 +313,11 @@ async def run(args: argparse.Namespace) -> int:
         try:
             _stop_hotkeys(hotkeys)
         finally:
-            await focus.stop()
+            try:
+                await focus.stop()
+            finally:
+                if diagnostics_handler is not None:
+                    close_model_diagnostics(diagnostics_handler)
 
 
 def _run_speech_command(args: argparse.Namespace) -> int:
@@ -328,6 +359,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("google_genai.models").addFilter(
+        _suppress_spurious_google_afc_warning
     )
     try:
         if args.command == "speech":
