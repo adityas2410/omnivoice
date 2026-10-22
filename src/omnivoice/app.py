@@ -19,6 +19,7 @@ from omnivoice.config import (
 )
 from omnivoice.interaction import InteractionController, RequestMode
 from omnivoice.models import ModelRegistry
+from omnivoice.history import ChatHistory, HistoryError
 from omnivoice.planning import (
     ActionPlanGenerator,
     close_model_diagnostics,
@@ -134,6 +135,7 @@ async def run(args: argparse.Namespace) -> int:
     models = ModelRegistry(config.agent)
     planner = ActionPlanGenerator()
     console = Console()
+    history = ChatHistory()
     diagnostics_path = default_config_path().parent / "model-diagnostics.log"
     try:
         diagnostics_handler = configure_model_diagnostics(diagnostics_path.parent)
@@ -201,6 +203,7 @@ async def run(args: argparse.Namespace) -> int:
         models=models,
         context_service=context_service,
         context_enabled=config.agent.context.mode == "uia",
+        history=history,
         minimum_recording_seconds=config.speech.recording.minimum_seconds,
         silence_rms_threshold=config.speech.recording.silence_rms_threshold,
         recording_limit_seconds=config.speech.recording.max_seconds,
@@ -257,10 +260,17 @@ async def run(args: argparse.Namespace) -> int:
                 stt_status,
                 tts_status,
                 microphone_status,
+                history.describe_status(),
             )
         )
 
     try:
+        history.busy = True
+        try:
+            await history.start()
+        except HistoryError as exc:
+            history.busy = False
+            console.status(str(exc))
         # Start focus monitoring before accepting hotkeys so a request can never
         # enter the controller without its safety dependency being available.
         focus.start()
@@ -298,12 +308,14 @@ async def run(args: argparse.Namespace) -> int:
             controller,
             runtime_status,
             models,
+            history,
         )
         return 0
     finally:
         # Shutdown runs while the event loop is alive, allowing pending request
         # cancellation and COM commands to complete before their threads exit.
         await controller.shutdown()
+        await history.close()
         await context_service.stop()
         if recorder is not None:
             await recorder.shutdown()

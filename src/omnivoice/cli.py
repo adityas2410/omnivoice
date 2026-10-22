@@ -9,9 +9,18 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from omnivoice.interaction import InteractionController, RequestState
 from omnivoice.models import ModelRegistry, ModelSelectionError
+from omnivoice.history import ChatHistory, HistoryError, safe_text
+from omnivoice.chat_ui import SessionPicker, replay
 
 
 HELP = """Commands:
+  /chats         List saved chats
+  /chat new [NAME]  Create and select a chat
+  /chat open [ID]   Pick or resume a chat and show its full conversation
+  /chat rename NAME  Rename the active chat
+  /chat inspect [ID]  Show a full conversation without switching
+  /chat delete ID    Delete a chat and its history
+  /chat retry        Retry unavailable chat storage
   /help          Show this help
   /status        Show hotkeys, model, request, speech, microphone, and context state
   /models        Show configured agent models
@@ -36,17 +45,21 @@ class CommandDispatcher:
         models: ModelRegistry,
         status: Callable[[str], None],
         write: Callable[[str], None],
+        history: ChatHistory | None = None,
     ) -> None:
         self._controller = controller
         self._runtime_status = runtime_status
         self._models = models
         self._status = status
         self._write = write
+        self._history = history
 
-    def dispatch(self, line: str) -> bool:
+    async def dispatch(self, line: str) -> bool:
         """Handle one normalized line; return false when the console should exit."""
 
-        if line == "/help":
+        if line == "/chats" or line == "/chat" or line.startswith("/chat "):
+            await self._chat(line)
+        elif line == "/help":
             self._write(HELP)
         elif line == "/status":
             self._status(
@@ -80,6 +93,65 @@ class CommandDispatcher:
         else:
             self._status("Only slash commands are accepted. Use /help.")
         return True
+
+    async def _chat(self, line: str) -> None:
+        history = self._history
+        if history is None:
+            self._status("Chat storage is unavailable.")
+            return
+        listing = line == "/chats"
+        if not listing and self._controller.state is not RequestState.IDLE:
+            self._status(f"Busy ({self._controller.state.value}); chat was not changed.")
+            return
+        if history.busy:
+            self._status("Chat selection or replay already in progress.")
+            return
+        if not listing:
+            history.busy = True
+        try:
+            if listing:
+                for session in await history.list_sessions():
+                    marker = " *" if history.active and session.id == history.active.id else ""
+                    self._write(f"{session.id[:8]}  {safe_text(session.name, multiline=False)}{marker}  {session.updated_at}  {safe_text(session.preview, multiline=False)}\n")
+                return
+            _, _, args = line.partition(" ")
+            command, _, argument = args.partition(" ")
+            argument = argument.strip()
+            if command == "retry" and not argument:
+                await history.retry()
+                self._status("Chat storage ready. Pending outcomes saved; no actions replayed.")
+                return
+            if not history.healthy:
+                self._status("Chat storage unavailable; use /chat retry.")
+                return
+            if command == "new":
+                session = await history.create(argument or "New chat")
+            elif command == "open":
+                ident = argument or await SessionPicker(await history.list_sessions()).run()
+                if ident is None:
+                    return
+                session = await history.activate(ident)
+            elif command == "rename" and argument:
+                await history.rename(argument)
+                self._status("Chat renamed.")
+                return
+            elif command == "delete" and argument:
+                if not await history.delete(argument):
+                    self._status("Chat deleted.")
+                    return
+                session = history.active
+            elif command == "inspect":
+                session = await history.resolve(argument) if argument else history.active
+            else:
+                self._status("Usage: /chats or /chat new [NAME]|open [ID]|rename NAME|inspect [ID]|delete ID|retry")
+                return
+            if session is not None:
+                await replay(history, session, self._write)
+        except HistoryError as exc:
+            self._status(str(exc))
+        finally:
+            if not listing:
+                history.busy = False
 
     def _inspect_context(self) -> None:
         if self._controller.state is not RequestState.IDLE:
@@ -156,6 +228,7 @@ class Console:
         controller: InteractionController,
         runtime_status: Callable[[], str],
         models: ModelRegistry,
+        history: ChatHistory | None = None,
     ) -> None:
         """Read and dispatch slash commands until the user requests shutdown."""
 
@@ -165,12 +238,22 @@ class Console:
             models,
             self.status,
             lambda text: print(text, end=""),
+            history,
         )
         self.status("Ready. Use /help for commands.")
         with patch_stdout():
+            if history is not None and history.healthy and history.active is not None:
+                history.busy = True
+                try:
+                    await replay(history, history.active, lambda text: print(text, end=""))
+                except HistoryError as exc:
+                    self.status(str(exc))
+                finally:
+                    history.busy = False
             while True:
                 try:
-                    line = (await self._session.prompt_async("omnivoice> ")).strip()
+                    label = safe_text(history.active.name, multiline=False) if history and history.active else "no chat"
+                    line = (await self._session.prompt_async(f"omnivoice [{label}]> ")).strip()
                 except EOFError:
                     return
                 except KeyboardInterrupt:
@@ -180,5 +263,5 @@ class Console:
 
                 if not line:
                     continue
-                if not dispatcher.dispatch(line):
+                if not await dispatcher.dispatch(line):
                     return
