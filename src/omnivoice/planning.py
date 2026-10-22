@@ -16,6 +16,7 @@ from typing import Any
 import pydantic_ai
 from pydantic import ValidationError
 from pydantic_ai import Agent
+from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.exceptions import (
     ModelAPIError,
@@ -289,6 +290,7 @@ class ActionPlanGenerator:
         cancelled: asyncio.Event,
         selected_text: str | None = None,
         context: CapturedContext | None = None,
+        message_history: list[ModelMessage] | None = None,
     ) -> ActionPlan:
         """Run one bounded request and discard any result arriving after cancellation."""
 
@@ -309,11 +311,12 @@ class ActionPlanGenerator:
                 transcript,
                 selected_text,
                 context,
-                selection.input_token_budget,
+                selection.input_token_budget - history_tokens(message_history or []),
             )
             run_task = asyncio.create_task(
                 self._run(
-                    request, handle.model, run_usage, finish_reasons, validation_codes
+                    request, handle.model, run_usage, finish_reasons, validation_codes,
+                    message_history,
                 ),
                 name="omnivoice-model-request",
             )
@@ -403,6 +406,7 @@ class ActionPlanGenerator:
         run_usage: RunUsage,
         finish_reasons: list[str],
         validation_codes: list[str],
+        message_history: list[ModelMessage] | None = None,
     ) -> ActionPlan:
         def observe_response(
             _ctx: Any, *, request_context: Any, response: Any
@@ -424,6 +428,7 @@ class ActionPlanGenerator:
 
         result = await self._agent.run(
             transcript,
+            message_history=message_history,
             model=model,
             model_settings=ModelSettings(
                 temperature=0,
@@ -446,6 +451,16 @@ def _estimated_tokens(value: str) -> int:
     """Use one documented, deterministic estimate across Groq and Ollama."""
 
     return math.ceil(len(value.encode("utf-8")) / 3)
+
+
+def history_tokens(messages: list[ModelMessage]) -> int:
+    return math.ceil(len(ModelMessagesTypeAdapter.dump_json(messages)) / 3) if messages else 0
+
+
+def available_history_budget(transcript: str, selected_text: str | None, budget: int) -> int:
+    mandatory = _build_request(transcript, selected_text, None, budget)
+    overhead = planner_instructions() + json.dumps(ActionPlan.model_json_schema(), ensure_ascii=False)
+    return max(0, budget - _estimated_tokens(overhead + mandatory) - 16)
 
 
 def _build_request(
@@ -544,6 +559,9 @@ def _build_request(
 
         if target is not None:
             payload["target_context"] = None
+            continue
+        if payload["ui_context"] is not None:
+            payload["ui_context"] = None
             continue
         raise PlanGenerationError(
             "The request context exceeds the selected model input budget."

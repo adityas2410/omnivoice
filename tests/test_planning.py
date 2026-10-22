@@ -9,6 +9,7 @@ from pydantic_ai import ModelProfile
 from pydantic_ai import models as pydantic_models
 from pydantic_ai.exceptions import ModelHTTPError, UserError
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from omnivoice.history import turn_messages
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage
@@ -488,3 +489,45 @@ async def test_model_output_is_not_capped_at_1024_tokens() -> None:
     assert generator.last_usage is not None
     assert generator.last_usage.input_tokens == 300
     assert generator.last_usage.output_tokens == 1_025
+
+
+@pytest.mark.asyncio
+async def test_session_history_reaches_model_and_precedes_optional_window_context():
+    history = turn_messages({
+        "request": "previous request", "selected_text": "explicit old selection " * 30,
+        "plan_json": '{"actions":[],"spoken_summary":null}', "status": "rejected",
+        "failure_category": "rejected", "completed_actions": 0, "possibly_partial": False,
+    })
+    received = []
+    def respond(messages, info):
+        received.extend(messages)
+        return ModelResponse(parts=[TextPart('{"actions":[]}')])
+    generator = ActionPlanGenerator(model_factory(FunctionModel(respond)))
+    context = CapturedContext(ui_context=UIContext(
+        status="complete", document_text=DocumentTextContext(content="automatic context " * 3000),
+    ))
+    await generator.generate("new request", ModelSelection("test", "groq:test", 4096), asyncio.Event(),
+                             context=context, message_history=history)
+    # Pydantic AI combines consecutive user messages with the newest request.
+    assert received[:2] == history[:2]
+    prompts = [part.content for message in received if isinstance(message, ModelRequest)
+               for part in message.parts if isinstance(part, UserPromptPart)]
+    current = json.loads(prompts[-1])
+    assert current["request"] == "new request"
+    assert current["selected_text"] is None
+    assert "execution_result" in prompts[-2]
+    assert len(prompts[-1]) < len(context.ui_context.document_text.content)
+    overhead = planning.planner_instructions() + json.dumps(planning.ActionPlan.model_json_schema(), ensure_ascii=False)
+    assert planning._estimated_tokens(overhead + prompts[-1]) + planning.history_tokens(history) <= 4096
+
+
+def test_optional_context_can_be_fully_dropped_at_mandatory_budget():
+    request = planning._build_request("hello", None, None, 10000)
+    overhead = planning.planner_instructions() + json.dumps(planning.ActionPlan.model_json_schema(), ensure_ascii=False)
+    minimum = planning._estimated_tokens(overhead + request)
+    context = CapturedContext(ui_context=UIContext(
+        status="complete", document_text=DocumentTextContext(content="large context " * 100),
+    ))
+    payload = json.loads(planning._build_request("hello", None, context, minimum))
+    assert payload["ui_context"] is None
+    assert payload["request"] == "hello"
