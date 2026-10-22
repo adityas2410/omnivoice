@@ -7,6 +7,7 @@ import json
 import logging
 from enum import StrEnum
 from typing import Callable, Protocol
+from pydantic_ai.messages import ModelMessage
 
 from omnivoice.actions import (
     ActionPlan,
@@ -23,7 +24,8 @@ from omnivoice.context import (
     unavailable_context,
 )
 from omnivoice.models import ModelRegistry, ModelSelection
-from omnivoice.planning import ModelTokenUsage, PlanGenerationError
+from omnivoice.planning import ModelTokenUsage, PlanGenerationError, available_history_budget
+from omnivoice.history import ChatHistory, HistoryError, render_turn
 from omnivoice.speech.ports import (
     AudioRecorder,
     ReadyCue,
@@ -103,6 +105,7 @@ class ActionPlanPort(Protocol):
         cancelled: asyncio.Event,
         selected_text: str | None = None,
         context: CapturedContext | None = None,
+        message_history: list[ModelMessage] | None = None,
     ) -> ActionPlan: ...
 
 
@@ -146,6 +149,7 @@ class InteractionController:
         models: ModelRegistry | None = None,
         context_service: ContextPort | None = None,
         context_enabled: bool = False,
+        history: ChatHistory | None = None,
         minimum_recording_seconds: float = 0.15,
         silence_rms_threshold: int = 80,
         recording_limit_seconds: float = 30.0,
@@ -161,6 +165,9 @@ class InteractionController:
         self._models = models
         self._context_service = context_service
         self._context_enabled = context_enabled
+        self.history = history
+        self._completed_actions = 0
+        self._action_in_progress = False
         self._last_context_inspection: str | None = None
         self._minimum_recording_seconds = minimum_recording_seconds
         self._silence_rms_threshold = silence_rms_threshold
@@ -224,6 +231,13 @@ class InteractionController:
 
         if self._shutting_down:
             return
+        if self.history is not None:
+            if self.history.busy:
+                self._status("Chat selection or replay in progress; hotkey press ignored.")
+                return
+            if mode is RequestMode.AGENT and not self.history.healthy:
+                self._status("Chat storage unavailable; AI actions paused. Use /chat retry.")
+                return
         if self.state is not RequestState.IDLE:
             self._status(f"Busy ({self.state.value}); hotkey press ignored.")
             LOGGER.info("event=hotkey_ignored state=%s", self.state.value)
@@ -238,7 +252,8 @@ class InteractionController:
         self._active_mode = mode
         self._set_state(RequestState.VALIDATING)
         self._request_task = asyncio.create_task(
-            self._run_request(mode, selection, self._context_enabled),
+            self._run_request(mode, selection, self._context_enabled,
+                              self.history.active.id if self.history and self.history.active else None),
             name="omnivoice-request",
         )
 
@@ -296,6 +311,7 @@ class InteractionController:
         mode: RequestMode,
         selection: ModelSelection | None,
         context_enabled: bool,
+        session_id: str | None = None,
     ) -> None:
         """Run one request mode against one immutable focus lease."""
 
@@ -303,6 +319,11 @@ class InteractionController:
         recorder_active = False
         selection_context: SelectionContext | None = None
         model_requested = False
+        turn_id: int | None = None
+        saved_plan: ActionPlan | None = None
+        failure_category: str | None = None
+        self._completed_actions = 0
+        self._action_in_progress = False
         completion_speech = "Done."
         try:
             await self._stop_pending_speech()
@@ -416,6 +437,21 @@ class InteractionController:
                     )
                     self._status(captured_context.metadata_summary())
                 self._set_state(RequestState.PROCESSING)
+                history_args = {}
+                if self.history is not None:
+                    if session_id is None or not self.history.healthy:
+                        raise HistoryError("Chat storage unavailable; AI actions paused. Use /chat retry.")
+                    selected = selection_context.text if selection_context else None
+                    budget = available_history_budget(transcript, selected, selection.input_token_budget)
+                    turn_id = await self.history.begin(session_id, transcript, selected, selection.selector)
+                    messages, omitted = await self.history.message_history(session_id, turn_id, budget)
+                    history_args["message_history"] = messages
+                    if omitted:
+                        self._status("Older chat turns omitted from model input to fit its budget; full history is retained.")
+                    if self._cancelled.is_set() or not await self._focus.matches(lease):
+                        raise _RequestCancelled("Focus changed. Request cancelled.")
+                    if selection_context is not None and not await self._focus.selection_matches(selection_context):
+                        raise _RequestCancelled("Selected text changed. Request cancelled.")
                 self._status(
                     f"Generating an action plan with {selection.alias} "
                     f"({selection.selector})..."
@@ -432,10 +468,14 @@ class InteractionController:
                             else None
                         ),
                         context=captured_context,
+                        **history_args,
                     ),
                     has_selection=selection_context is not None,
                 )
                 self._status(f"Model output: {format_action_plan(plan)}")
+                saved_plan = plan
+                if self.history is not None and turn_id is not None:
+                    await self.history.save_plan(turn_id, plan)
                 if not plan.actions:
                     raise _RequestRejected(
                         "The request cannot be completed with the permitted actions."
@@ -463,6 +503,7 @@ class InteractionController:
             self._finish(RequestState.CANCELLED)
             await self._speak("Cancelled.")
         except (ActionPlanRejected, _RequestRejected) as exc:
+            failure_category = "rejected"
             self._status(str(exc) or "The request could not be completed.")
             LOGGER.info("event=request_not_completed reason=%s", type(exc).__name__)
             self._finish(RequestState.CANCELLED)
@@ -490,11 +531,18 @@ class InteractionController:
                 "Request failed." if mode is RequestMode.AGENT else "Cancelled."
             )
         except PlanGenerationError as exc:
+            failure_category = "planning_failed"
             self._status(exc.user_message)
             LOGGER.info("event=plan_generation_failed error_type=%s", type(exc).__name__)
             self._finish(RequestState.FAILED)
             await self._speak("Request failed.")
+        except HistoryError as exc:
+            failure_category = "storage_unavailable"
+            self._status(str(exc))
+            self._finish(RequestState.FAILED)
+            await self._speak("Request failed.")
         except (FocusError, InputError) as exc:
+            failure_category = "input_or_focus_failed"
             message = f"Request failed safely: {exc}"
             self._status(message)
             LOGGER.info("event=request_failed error_type=%s", type(exc).__name__)
@@ -503,6 +551,7 @@ class InteractionController:
                 "Request failed." if mode is RequestMode.AGENT else "Cancelled."
             )
         except BaseException as exc:
+            failure_category = "internal_error"
             self._status("Request failed safely because of an unexpected internal error.")
             # Arbitrary provider exception messages can contain content, so the
             # request log records only their class rather than a traceback.
@@ -512,6 +561,26 @@ class InteractionController:
                 "Request failed." if mode is RequestMode.AGENT else "Cancelled."
             )
         finally:
+            if self.history is not None and turn_id is not None:
+                outcome = self.last_outcome.value if self.last_outcome is not None else "interrupted"
+                if failure_category == "rejected":
+                    outcome = "rejected"
+                category = failure_category or ("cancelled" if outcome == "cancelled" else None)
+                partial = self._action_in_progress or (
+                    outcome != "completed" and self._completed_actions > 0
+                )
+                try:
+                    turn = await self.history.finish(turn_id, outcome, category, self._completed_actions, partial, saved_plan)
+                    self._status(render_turn(turn))
+                except HistoryError as exc:
+                    self._status(f"Execution result: {outcome}. {exc} Outcome saving will be retried without repeating input.")
+                    # Replay still uses the same renderer even if persistence failed.
+                    self._status(render_turn({
+                        "request": transcript, "selected_text": selection_context.text if selection_context else None,
+                        "plan_json": format_action_plan(saved_plan) if saved_plan else None,
+                        "status": outcome, "failure_category": category,
+                        "completed_actions": self._completed_actions, "possibly_partial": partial,
+                    }))
             if model_requested and self._planner is not None:
                 usage = self._planner.last_usage
                 self._status(
@@ -643,6 +712,7 @@ class InteractionController:
             if self._cancelled.is_set() or not await self._focus.matches(lease):
                 raise _RequestCancelled("Focus changed. Request cancelled.")
             if isinstance(action, InsertTextAction):
+                self._action_in_progress = True
                 await self._keyboard.type_text(
                     action.text,
                     lambda: self._focus.matches(lease),
@@ -651,13 +721,17 @@ class InteractionController:
             elif isinstance(action, ReplaceSelectionAction):
                 if selection is None or not await self._focus.selection_matches(selection):
                     raise _RequestCancelled("Selected text changed. Request cancelled.")
+                self._action_in_progress = True
                 await self._replace_selection(lease, action.text)
             elif isinstance(action, ShortcutAction):
+                self._action_in_progress = True
                 await self._keyboard.press_shortcut(
                     action.keys,
                     lambda: self._focus.matches(lease),
                     self._cancelled,
                 )
+            self._completed_actions += 1
+            self._action_in_progress = False
 
     async def _replace_selection(self, lease: FocusLease, text: str) -> None:
         """Replace the active range, translating only CR/LF into guarded Enter presses."""

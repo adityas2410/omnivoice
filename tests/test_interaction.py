@@ -4,6 +4,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
+import sqlite3
+from pydantic_ai.messages import ModelMessagesTypeAdapter
+from omnivoice.history import ChatHistory
 
 from omnivoice.actions import (
     ActionPlan,
@@ -195,6 +199,7 @@ class FakePlanner:
         self.error: Exception | None = None
         self.contexts: list[CapturedContext | None] = []
         self.last_usage = None
+        self.histories = []
 
     async def generate(
         self,
@@ -203,7 +208,9 @@ class FakePlanner:
         cancelled: asyncio.Event,
         selected_text: str | None = None,
         context: CapturedContext | None = None,
+        message_history=None,
     ) -> ActionPlan:
+        self.histories.append(message_history)
         self.contexts.append(context)
         self.calls.append((transcript, selection, selected_text))
         self.started.set()
@@ -988,3 +995,177 @@ async def test_partial_shortcut_stops_remaining_agent_actions(tmp_path: Path) ->
     assert len(backend.sent) == 2  # failed shortcut batch, then key-up cleanup
     assert controller.last_outcome is RequestState.FAILED
     assert tts.messages == ["Request failed."]
+
+
+@pytest_asyncio.fixture
+async def session_history(tmp_path):
+    history = ChatHistory(tmp_path / "history.sqlite3")
+    await history.start()
+    try:
+        yield history
+    finally:
+        await history.close()
+
+
+async def run_voice_request(controller, mode=RequestMode.AGENT):
+    controller.hotkey_pressed(mode)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(mode)
+    await wait_until_idle(controller)
+
+
+@pytest.mark.asyncio
+async def test_agent_history_is_persistent_isolated_and_excludes_automatic_context(tmp_path, session_history, caplog):
+    history = session_history
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection-token", LEASE, "private selected text")
+    planner = FakePlanner(ActionPlan(actions=(ReplaceSelectionAction(type="replace_selection", text="new text"),)))
+    statuses = []
+    controller, backend, _, _, _ = make_controller(
+        tmp_path, focus=focus, planner=planner, models=configured_models(),
+        context_service=FakeContext(), context_enabled=True, statuses=statuses,
+    )
+    controller.history = history
+    first = history.active.id
+    with caplog.at_level(logging.INFO):
+        await run_voice_request(controller)
+        controller._models.select("ollama-local")
+        await run_voice_request(controller)
+    turns = await history.turns(first)
+    assert len(turns) == 2
+    assert turns[0]["selected_text"] == "private selected text"
+    assert turns[0]["status"] == "completed"
+    assert turns[0]["completed_actions"] == 1
+    assert turns[1]["model"].startswith("ollama:")
+    assert planner.histories[0] == []
+    assert len(planner.histories[1]) == 3
+    serialized = ModelMessagesTypeAdapter.dump_json(planner.histories[1]).decode()
+    assert "private selected text" in serialized
+    assert "private page context" not in serialized
+    assert "private page context" not in str(turns)
+    assert "private transcript" not in caplog.text
+    assert any("You:\nprivate transcript" in s and "AI:" in s for s in statuses)
+    await history.create("other")
+    await run_voice_request(controller)
+    assert planner.histories[-1] == []
+    assert len(await history.turns(first)) == 2
+
+
+@pytest.mark.asyncio
+async def test_dictation_and_pretranscription_cancellation_are_not_history(tmp_path, session_history):
+    controller, *_ = make_controller(tmp_path)
+    controller.history = session_history
+    await run_voice_request(controller, RequestMode.DICTATION)
+    controller.hotkey_pressed()
+    controller.hotkey_released()
+    await wait_until_idle(controller)
+    assert await session_history.turns(session_history.active.id) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["insert", "read", "update", "_finish"])
+async def test_history_failures_pause_ai_and_retry_never_repeats_input(tmp_path, session_history, monkeypatch, stage):
+    history = session_history
+    planner = FakePlanner(ActionPlan(actions=(InsertTextAction(type="insert_text", text="reply"),)))
+    controller, backend, _, _, _ = make_controller(tmp_path, planner=planner, models=configured_models())
+    controller.history = history
+    original_call = history._call
+    injected = False
+    async def fail_once(fn, *args):
+        nonlocal injected
+        if fn.__name__ == stage and not injected:
+            injected = True
+            def failure():
+                raise sqlite3.OperationalError("injected disk failure")
+            return await original_call(failure)
+        return await original_call(fn, *args)
+    monkeypatch.setattr(history, "_call", fail_once)
+    await run_voice_request(controller)
+    assert injected and not history.healthy
+    assert bool(backend.sent) == (stage == "_finish")
+    sent = len(backend.sent)
+    controller.hotkey_pressed(RequestMode.AGENT)
+    assert controller.state is RequestState.IDLE
+    await history.retry()
+    assert history.healthy and len(backend.sent) == sent
+    turns = await history.turns(history.active.id)
+    assert len(turns) == (0 if stage == "insert" else 1)
+    if turns:
+        assert turns[0]["status"] == ("completed" if stage == "_finish" else "failed")
+    assert history._pending is None
+
+
+@pytest.mark.asyncio
+async def test_partial_input_and_model_cancellation_are_remembered(tmp_path, session_history):
+    planner = FakePlanner(ActionPlan(actions=(InsertTextAction(type="insert_text", text="reply"),)))
+    controller, backend, _, _, _ = make_controller(tmp_path, backend=FakeBackend(partial=True), planner=planner, models=configured_models())
+    controller.history = session_history
+    await run_voice_request(controller)
+    turns = await session_history.turns(session_history.active.id)
+    assert turns[0]["status"] == "failed"
+    assert turns[0]["possibly_partial"] and turns[0]["completed_actions"] == 0
+    planner.wait_for_cancellation = True
+    planner.started.clear()
+    controller.hotkey_pressed(RequestMode.AGENT)
+    await wait_for_state(controller, RequestState.LISTENING)
+    controller.hotkey_released(RequestMode.AGENT)
+    await planner.started.wait()
+    controller.cancel()
+    await wait_until_idle(controller)
+    turns = await session_history.turns(session_history.active.id)
+    assert turns[1]["status"] == "cancelled"
+    assert turns[1]["plan_json"] is None
+    assert not turns[1]["possibly_partial"]
+
+
+@pytest.mark.asyncio
+async def test_session_picker_busy_blocks_hotkeys_including_dictation(tmp_path, session_history):
+    controller, backend, recorder, _, _ = make_controller(tmp_path)
+    controller.history = session_history
+    session_history.busy = True
+    controller.hotkey_pressed(RequestMode.AGENT)
+    controller.hotkey_pressed(RequestMode.DICTATION)
+    assert controller.state is RequestState.IDLE
+    assert not recorder.started and not backend.sent
+    session_history.busy = False
+    session_history.healthy = False
+    await run_voice_request(controller, RequestMode.DICTATION)
+    assert backend.sent
+
+
+@pytest.mark.asyncio
+async def test_selection_changed_during_history_load_is_not_sent_to_model(tmp_path, session_history, monkeypatch):
+    focus = FakeFocus()
+    focus.selection = SelectionContext("selection", LEASE, "source")
+    planner = FakePlanner(ActionPlan(actions=(ReplaceSelectionAction(type="replace_selection", text="replacement"),)))
+    controller, backend, _, _, _ = make_controller(tmp_path, focus=focus, planner=planner, models=configured_models())
+    controller.history = session_history
+    original = session_history.message_history
+    async def change_selection(*args):
+        messages = await original(*args)
+        focus.selection_valid = False
+        return messages
+    monkeypatch.setattr(session_history, "message_history", change_selection)
+    await run_voice_request(controller)
+    assert not planner.calls and not backend.sent
+    turns = await session_history.turns(session_history.active.id)
+    assert turns[0]["status"] == "cancelled"
+    assert not turns[0]["possibly_partial"]
+
+
+@pytest.mark.asyncio
+async def test_history_counts_completed_actions_before_partial_later_action(tmp_path, session_history):
+    class PartialSecondBackend(FakeBackend):
+        def send(self, inputs):
+            self.partial = len(self.sent) >= 1
+            return super().send(inputs)
+    planner = FakePlanner(ActionPlan(actions=(
+        InsertTextAction(type="insert_text", text="a"),
+        ShortcutAction(type="shortcut", keys=("ctrl", "s")),
+    )))
+    controller, backend, _, _, _ = make_controller(tmp_path, backend=PartialSecondBackend(), planner=planner, models=configured_models())
+    controller.history = session_history
+    await run_voice_request(controller)
+    turn = (await session_history.turns(session_history.active.id))[0]
+    assert turn["status"] == "failed" and turn["possibly_partial"]
+    assert turn["completed_actions"] == 1
